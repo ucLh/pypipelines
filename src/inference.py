@@ -3,6 +3,8 @@ import numpy as np
 import os
 import tensorflow as tf
 
+from data import SeverstalData
+
 tf.compat.v1.disable_eager_execution()
 
 
@@ -25,6 +27,19 @@ def get_io_tensors(sess, in_node, out_node):
     return in_tensor, out_tensor
 
 
+def average_models_preds(sessions, inputs, outputs, img):
+    preds = []
+    for j in range(len(sessions)):
+        preds.append(sessions[j].run(outputs[j], {inputs[j]: img}))
+    preds = list(map(np.array, preds))
+    preds = np.concatenate(preds)
+    return np.mean(preds, axis=0)
+
+
+def sigmoid(x):
+    return 1/(1+np.exp(-x))
+
+
 # Import the TF graph : first
 first_graph = load_graph('./data/severstalmodels/unet_se_resnext50_32x4d.pb', 'first')
 
@@ -39,19 +54,36 @@ second_sess = create_session(second_graph)
 second_input_tensor, second_prob_tensor = get_io_tensors(second_sess, 'second/resnext_input:0',
                                                          'second/resnext_output:0')
 
+sessions = [first_sess, second_sess]
+inputs = [first_input_tensor, second_input_tensor]
+outputs = [first_prob_tensor, second_prob_tensor]
+
 image_paths = os.listdir('./data/nn_data/Canon/cropped')
 image_paths = list(map(lambda x: './data/nn_data/Canon/cropped/' + x, image_paths))
-img_orig = cv2.imread(image_paths[0])
-img = cv2.cvtColor(img_orig, cv2.COLOR_BGR2RGB)
-img = np.array(img)
-img = img[np.newaxis, ...]
-img = np.transpose(img, (0, 3, 1, 2))
+nrof_images = len(image_paths)
 
-first_predictions, = first_sess.run(
-        first_prob_tensor, {first_input_tensor: img})
-# first_highest_probability_index = np.argmax(first_predictions)
+images = SeverstalData(image_paths, first_sess, batch_size=1)
+images_flipped = SeverstalData(image_paths, first_sess, batch_size=1, use_flip=True)
 
-second_predictions, = second_sess.run(
-        second_prob_tensor, {second_input_tensor: img})
-print(first_predictions, second_predictions)
+for i in range(nrof_images):
+    img = images.batch()
+    img_flipped = images_flipped.batch()
+
+    pred = average_models_preds(sessions, inputs, outputs, img)
+    pred_sig = sigmoid(pred)
+
+    pred_flipped = average_models_preds(sessions, inputs, outputs, img_flipped)
+    pred_flipped_sig = sigmoid(pred_flipped)
+
+    preds = np.mean(np.concatenate((pred_sig[np.newaxis, :], pred_flipped_sig[np.newaxis, :])), axis=0)
+    print(preds.shape)
+
+
+# first_predictions, = first_sess.run(
+#         first_prob_tensor, {first_input_tensor: img})
+# # first_highest_probability_index = np.argmax(first_predictions)
+#
+# second_predictions, = second_sess.run(
+#         second_prob_tensor, {second_input_tensor: img})
+# print(first_predictions, second_predictions)
 # second_highest_probability_index = np.argmax(second_predictions)

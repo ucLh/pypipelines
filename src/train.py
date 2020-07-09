@@ -1,5 +1,7 @@
 import os
 import time
+
+from apex import amp
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -14,22 +16,28 @@ from util import Meter, epoch_log
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, model):
+    def __init__(self, model, checkpont):
         self.num_workers = 6
         self.batch_size = {"train": 4, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
         self.lr = 5e-4
-        self.num_epochs = 20
+        self.num_epochs = 40
         self.start_epoch = 0
-        self.best_loss = float("inf")
+        self.best_dice = 0
         self.phases = ["train", "val"]
         self.device = torch.device("cuda:0")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
-        self.criterion = torch.nn.BCEWithLogitsLoss()
-        self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
-        self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True)
         self.net = self.net.to(self.device)
+        self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr))
+        if checkpont is not None:
+            self.net.load_state_dict(checkpont["state_dict"])
+            self.optimizer.load_state_dict(checkpont["optimizer"])
+            amp.load_state_dict(checkpont["amp"])
+            self.start_epoch = checkpont["epoch"]
+            self.best_dice = checkpont["best_dice"]
+        self.criterion = torch.nn.BCEWithLogitsLoss()
+        self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
         cudnn.benchmark = True
         self.dataloaders = {
             phase: provider(
@@ -51,7 +59,6 @@ class Trainer(object):
         images = images.to(self.device)
         masks = targets.to(self.device)
         outputs = self.net(images)
-        print(outputs.shape)
         loss = self.criterion(outputs, masks)
         return loss, outputs
 
@@ -71,7 +78,8 @@ class Trainer(object):
             loss, outputs = self.forward(images, targets)
             loss = loss / self.accumulation_steps
             if phase == "train":
-                loss.backward()
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
                 if (itr + 1) % self.accumulation_steps == 0:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
@@ -85,42 +93,37 @@ class Trainer(object):
         self.dice_scores[phase].append(dice)
         self.iou_scores[phase].append(iou)
         torch.cuda.empty_cache()
-        return epoch_loss
+        return epoch_loss, dice
 
     def start(self):
         for epoch in range(self.start_epoch, self.num_epochs):
             self.iterate(epoch, "train")
             state = {
                 "epoch": epoch,
-                "best_loss": self.best_loss,
+                "best_dice": self.best_dice,
                 "state_dict": self.net.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
+                "amp": amp.state_dict(),
             }
             with torch.no_grad():
-                val_loss = self.iterate(epoch, "val")
+                val_loss, val_dice = self.iterate(epoch, "val")
                 self.scheduler.step(val_loss)
-            if val_loss < self.best_loss:
+            if val_dice > self.best_dice:
                 print("******** New optimal found, saving state ********")
-                state["best_loss"] = self.best_loss = val_loss
+                state["best_dice"] = self.best_dice = val_dice
                 torch.save(state, "./model.pth")
             print()
 
+
 ckpt = None
 if os.path.isfile("./model.pth"):
-    ckpt = torch.load("./model.pth")
     model = smp.Unet("efficientnet-b5", encoder_weights=None, classes=4, activation=None)
-    model.load_state_dict(ckpt["state_dict"])
-
+    ckpt = torch.load("./model.pth")
     print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
 else:
     model = smp.Unet("efficientnet-b5", encoder_weights="imagenet", classes=4, activation=None)
 
-model_trainer = Trainer(model)
-if ckpt is not None:
-    model_trainer.optimizer.load_state_dict(ckpt["optimizer"])
-    model_trainer.start_epoch = ckpt["epoch"]
-    model_trainer.best_loss = ckpt["best_loss"]
-
+model_trainer = Trainer(model, ckpt)
 # Visualization check
 # image, mask = model_trainer.dataloaders["train"].dataset[4]
 # image = np.transpose(image, [1, 2, 0])

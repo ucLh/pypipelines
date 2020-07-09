@@ -6,7 +6,7 @@ import tensorflow as tf
 
 from data import ImageDataRaw
 
-GRAPH_PB_PATH = '/home/luch/Programming/Python/TMK/data/severstalmodels/unet_se_resnext50_32x4d.pb'
+GRAPH_PB_PATH = '/data/severstalmodels/unet_se_resnext50_32x4d.pb'
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
 with tf.compat.v1.Session(config=config) as sess:
@@ -44,3 +44,7 @@ with tf.compat.v1.Session(config=config) as sess:
 # unet_se_resnext50_32x4d.pb input.1:0 882:0
 # unet_mobilenet2.pb resnext_input:0 resnext_output:0
 # unet_resnet34.pb input.1:0 524:0
+
+
+
+

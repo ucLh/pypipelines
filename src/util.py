@@ -1,6 +1,10 @@
+import logging
+logging.basicConfig(level=logging.DEBUG, filemode='w')
+import os
+
 import numpy as np
 import torch
-
+from torch.utils.tensorboard import SummaryWriter
 
 def predict(X, threshold):
     '''X is sigmoid output of the model'''
@@ -71,12 +75,31 @@ class Meter:
         return dices, iou
 
 
-def epoch_log(phase, epoch, epoch_loss, meter, start):
-    '''logging the metrics at the end of an epoch'''
-    dices, iou = meter.get_metrics()
-    dice, dice_neg, dice_pos = dices
-    print("Loss: %0.4f | IoU: %0.4f | dice: %0.4f | dice_neg: %0.4f | dice_pos: %0.4f" % (epoch_loss, iou, dice, dice_neg, dice_pos))
-    return dice, iou
+class MetricsLogger:
+
+    def __init__(self, log_dir='../logs'):
+        if not os.path.isdir(log_dir):  # Create the log directory if it doesn't exist
+            os.makedirs(log_dir)
+        self.logger = self.config_logger('metrics_logger', '../logs/metrics.log')
+        self.tensorboard_writer = SummaryWriter()
+
+    @staticmethod
+    def config_logger(logger_name, file, level=logging.INFO):
+        logger = logging.getLogger(logger_name)
+        handler1 = logging.FileHandler(file)
+        handler1.setLevel(level)
+        logger.addHandler(handler1)
+        return logger
+
+    def epoch_log(self, phase, epoch, epoch_loss, meter, start, log_dir='../logs'):
+        '''logging the metrics at the end of an epoch'''
+        dices, iou = meter.get_metrics()
+        dice, dice_neg, dice_pos = dices
+        if phase == 'val':
+            self.logger.info(f"Epoch: {epoch}| Loss: {epoch_loss:.4f} | IoU: {iou:.4f} | "
+                             f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
+                             f"dice_pos: {dice_pos:.4f}")
+        return dice, iou
 
 
 def compute_ious(pred, label, classes, ignore_index=255, only_present=True):

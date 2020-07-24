@@ -1,7 +1,8 @@
-import enum
 import warnings
 warnings.filterwarnings('ignore')
+import enum
 import os
+
 
 import numpy as np
 import cv2
@@ -22,7 +23,7 @@ from mlcomp.contrib.transform.rle import mask2rle
 from mlcomp.contrib.transform.tta import TtaWrap
 
 from data import make_mask_custom
-from util import compute_iou_batch, dice_channel_torch, dice_single_channel
+from util import compute_iou_batch, dice_channel_torch, dice_single_channel, MetricsLogger
 
 
 class Model:
@@ -88,15 +89,12 @@ def calculate_dice_and_iou(model):
             p_img = np.array(p_img)
             # Make it seem like a batch of 1
             p_img = torch.tensor(p_img[np.newaxis, :])
-            if single_channel:
-                dice_score_list.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
-            else:
-                dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
+
+            dice_score_list_ch.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
+            dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
             iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
 
-            return dice_score_list, iou_score_list
-
-    res, dice_score_list, iou_score_list = [], [], []
+    res, dice_score_list, dice_score_list_ch, iou_score_list = [], [], [], []
     total = len(datasets[0]) // batch_size
     with torch.no_grad():
         for j, loaders_batch in enumerate(tqdm(zip(*loaders), total=total)):
@@ -115,11 +113,12 @@ def calculate_dice_and_iou(model):
             preds = tta_mean(preds)
 
             # Batch post processing
-            dice_score_list, iou_score_list = batch_postprocessing()
+            batch_postprocessing()
 
     dice = np.mean(dice_score_list)
+    dice_ch = np.mean(dice_score_list_ch)
     iou = np.nanmean(iou_score_list)
-    return dice, iou, res
+    return dice, dice_ch, iou, res
 
 
 img_folder = '../data/cropped/'
@@ -128,7 +127,6 @@ batch_size = 1
 num_workers = 0
 thresholds = [0.5, 0.5, 0.5, 0.5]
 min_area = [600, 600, 1000, 2000]
-single_channel = False
 
 unet_se_resnext50_32x4d = \
     load('../data/severstalmodels/se_resnext50_32x4d.pth').cuda()
@@ -156,15 +154,17 @@ loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle
 table = PrettyTable()
 table.field_names = ['Model', 'dice', 'iou']
 
+logger = MetricsLogger.config_logger('metric_scores', '../logs/scores.log')
+
 dice_dict, iou_dict = {}, {}
 for key in models_dict.keys():
-    dice, iou, res = calculate_dice_and_iou(models_dict[key])
+    dice, dice_ch, iou, res = calculate_dice_and_iou(models_dict[key])
     print(dice, iou)
     table.add_row([key, dice, iou])
     dice_dict[key] = dice
     iou_dict[key] = iou
 
-print(table)
+logger.info(table)
 
 df = pd.DataFrame(res)
 df = df.fillna('')

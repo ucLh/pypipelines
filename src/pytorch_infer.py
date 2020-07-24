@@ -19,7 +19,7 @@ from mlcomp.contrib.dataset.classify import ImageDataset
 from mlcomp.contrib.transform.rle import mask2rle
 from mlcomp.contrib.transform.tta import TtaWrap
 
-from data import make_mask
+from data import make_mask_custom
 from util import compute_iou_batch, dice_channel_torch, dice_single_channel
 
 
@@ -110,7 +110,7 @@ with torch.no_grad():
             file = os.path.basename(file)
             # Image postprocessing
             p_img = []
-            _, target = make_mask(j, mask_df)
+            _, target = make_mask_custom(j, mask_df)
             target = torch.tensor(target[np.newaxis, :])
             for i in range(4):
                 p_channel = p[i]

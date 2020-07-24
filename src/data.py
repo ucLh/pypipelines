@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose, RandomBrightnessContrast)
+from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
+                            RandomBrightnessContrast, Resize, ImageOnlyTransform)
 from albumentations.pytorch import ToTensor
 
 
@@ -27,7 +28,7 @@ def make_mask(row_id, df):
     '''Given a row index, return image_id and mask (256, 1600, 4) from the dataframe `df`'''
     fname = df.iloc[row_id].name
     labels = df.iloc[row_id][:4]
-    masks = np.zeros((256, 1600, 4), dtype=np.float32) # float32 is V.Imp
+    masks = np.zeros((256, 1600, 4), dtype=np.float32)  # float32 is V.Imp
     # 4:class 1～4 (ch:0～3)
 
     for idx, label in enumerate(labels.values):
@@ -38,7 +39,28 @@ def make_mask(row_id, df):
             mask = np.zeros(256 * 1600, dtype=np.uint8)
             for pos, le in zip(positions, length):
                 mask[pos:(pos + le)] = 1
-            masks[:, :, idx] = mask.reshape(256, 1600, order='F')
+            masks[:, :, idx] = mask.reshape((256, 1600), order='F')
+    return fname, masks
+
+
+def make_mask_custom(row_id, df):
+    '''Given a row index, return image_id and mask (256, 1600, 4) from the dataframe `df`'''
+    fname = df['ImageId'][row_id]
+    labels = df['EncodedPixels'][row_id]
+    masks = np.zeros((4, 256, 1600), dtype=np.float32) # float32 is V.Imp
+    # 4:class 1～4 (ch:0～3)
+    idx = df['ClassId'][row_id] - 1
+
+    if labels is not np.nan:
+        label = labels.split(" ")
+        positions = map(int, label[0::2])
+        length = map(int, label[1::2])
+        mask = np.zeros(256 * 1600, dtype=np.uint8)
+        for pos, le in zip(positions, length):
+            mask[pos:(pos + le)] = 1
+        mask = mask.reshape((256, 1600), order='F')
+        masks[idx, :, :] = mask
+
     return fname, masks
 
 
@@ -54,10 +76,11 @@ class SteelDataset(Dataset):
 
     def __getitem__(self, idx):
         image_id, mask = make_mask(idx, self.df)
-        image_path = os.path.join(self.root, "train_images", image_id)
+        image_path = os.path.join(self.root, image_id)
         img = cv2.imread(image_path)
         augmented = self.transforms(image=img, mask=mask)
         img = augmented['image']
+        # img = self._tensor_to_grayscale(img)
         mask = augmented['mask']  # 1x256x1600x4
         mask = mask[0].permute(2, 0, 1)  # 4x256x1600
         return img, mask
@@ -65,10 +88,16 @@ class SteelDataset(Dataset):
     def __len__(self):
         return len(self.fnames)
 
+    @staticmethod
+    def _tensor_to_grayscale(img_tensor):
+        img_tensor = img_tensor[0, :, :]
+        return img_tensor[np.newaxis, ...]
+
 
 def get_transforms(phase, mean, std):
-    list_transforms = []
-    list_transforms.append(RandomCrop(256, 512, p=1))
+    list_transforms = list()
+    # list_transforms.append(RandomCrop(256, 512, p=1))
+    # list_transforms.append(Resize(256, 1024, p=1))
     if phase == "train":
         list_transforms.extend(
             [

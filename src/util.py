@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 import torch
-from torch.utils.tensorboard import SummaryWriter
+
 
 def predict(X, threshold):
     '''X is sigmoid output of the model'''
@@ -47,6 +47,25 @@ def metric(probability, truth, threshold=0.5, reduction='none'):
     return dice, dice_neg, dice_pos, num_neg, num_pos
 
 
+def dice_channel_torch(probability, truth, threshold):
+    batch_size = truth.shape[0]
+    channel_num = truth.shape[1]
+    mean_dice_channel = 0.
+    with torch.no_grad():
+        for i in range(batch_size):
+            for j in range(channel_num):
+                channel_dice = dice_single_channel(probability[i, j,:,:], truth[i, j, :, :], threshold)
+                mean_dice_channel += channel_dice/(batch_size * channel_num)
+    return mean_dice_channel
+
+
+def dice_single_channel(probability, truth, threshold, eps=1E-9):
+    p = (probability.view(-1) > threshold).float()
+    t = (truth.view(-1) > 0.5).float()
+    dice = (2.0 * (p * t).sum() + eps)/(p.sum() + t.sum() + eps)
+    return dice
+
+
 class Meter:
     '''A meter to keep track of iou and dice scores throughout an epoch'''
     def __init__(self, phase, epoch):
@@ -81,7 +100,6 @@ class MetricsLogger:
         if not os.path.isdir(log_dir):  # Create the log directory if it doesn't exist
             os.makedirs(log_dir)
         self.logger = self.config_logger('metrics_logger', '../logs/metrics.log')
-        self.tensorboard_writer = SummaryWriter()
 
     @staticmethod
     def config_logger(logger_name, file, level=logging.INFO):
@@ -99,6 +117,10 @@ class MetricsLogger:
             self.logger.info(f"Epoch: {epoch}| Loss: {epoch_loss:.4f} | IoU: {iou:.4f} | "
                              f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
                              f"dice_pos: {dice_pos:.4f}")
+        else:
+            print(f"Epoch: {epoch}| Loss: {epoch_loss:.4f} | IoU: {iou:.4f} | "
+                  f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
+                  f"dice_pos: {dice_pos:.4f}")
         return dice, iou
 
 

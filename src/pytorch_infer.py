@@ -16,14 +16,12 @@ from torch.jit import load
 
 from mlcomp.contrib.transform.albumentations import ChannelTranspose
 from mlcomp.contrib.dataset.classify import ImageDataset
-from mlcomp.contrib.transform.rle import rle2mask, mask2rle
+from mlcomp.contrib.transform.rle import mask2rle
 from mlcomp.contrib.transform.tta import TtaWrap
 
-# unet_se_resnext50_32x4d = \
-#     load('./severstalmodels/unet_se_resnext50_32x4d.pth').cuda()
-# unet_mobilenet2 = load('./severstalmodels/unet_mobilenet2.pth').cuda()
-# unet_resnet34 = load('./severstalmodels/unet_resnet34.pth').cuda()
-eff_net = load('./traced_model.pth').cuda()
+from data import make_mask
+from util import compute_iou_batch, dice_channel_torch, dice_single_channel
+
 
 class Model:
     def __init__(self, models):
@@ -39,9 +37,6 @@ class Model:
         return torch.mean(res, dim=0)
 
 
-model = eff_net
-model.eval()
-
 def create_transforms(additional):
     res = list(additional)
     # add necessary transformations
@@ -54,35 +49,53 @@ def create_transforms(additional):
     res = A.Compose(res)
     return res
 
+
+def tta_mean(preds):
+    preds = torch.stack(preds)
+    preds = torch.mean(preds, dim=0)
+    return preds.detach().cpu().numpy()
+
+
+# unet_se_resnext50_32x4d = \
+#     load('../data/severstalmodels/se_resnext50_32x4d.pth').cuda()
+# unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
+# unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
+eff_net = load('../ckpt/traced_effnetb7_1024_best.pth').cuda()
+
+model = eff_net
+model.eval()
+
 img_folder = '../data/cropped/'
 batch_size = 1
 num_workers = 0
+single_channel = False
 
 # Different transforms for TTA wrapper
 transforms = [
     [],
-    [A.HorizontalFlip(p=1)]
+    [A.HorizontalFlip(p=1)],
+    # [A.VerticalFlip(p=1)],
 ]
 
 transforms = [create_transforms(t) for t in transforms]
 datasets = [TtaWrap(ImageDataset(img_folder=img_folder, transforms=t), tfms=t) for t in transforms]
 loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle=False) for d in datasets]
 
+mask_df = pd.read_csv('../data/cropped.csv')
 thresholds = [0.5, 0.5, 0.5, 0.5]
 min_area = [600, 600, 1000, 2000]
 
 res = []
+dice_score_list, iou_score_list = [], []
 # Iterate over all TTA loaders
 total = len(datasets[0]) // batch_size
 with torch.no_grad():
-    for loaders_batch in tqdm(zip(*loaders), total=total):
+    for j, loaders_batch in enumerate(tqdm(zip(*loaders), total=total)):
         preds = []
         image_file = []
         for i, batch in enumerate(loaders_batch):
             features = batch['features'].cuda()
-            dummy = torch.ones((1, 3, 256, 1600)).cuda()
-            output = model(dummy)
-            #         print(features.shape)
+            output = model(features)
             p = torch.sigmoid(output)
             # inverse operations for TTA
             p = datasets[i].inverse(p)
@@ -90,29 +103,41 @@ with torch.no_grad():
             image_file = batch['image_file']
 
         # TTA mean
-        preds = torch.stack(preds)
-        preds = torch.mean(preds, dim=0)
-        preds = preds.detach().cpu().numpy()
-        print(preds.shape)
+        preds = tta_mean(preds)
 
         # Batch post processing
         for p, file in zip(preds, image_file):
             file = os.path.basename(file)
             # Image postprocessing
+            p_img = []
+            _, target = make_mask(j, mask_df)
+            target = torch.tensor(target[np.newaxis, :])
             for i in range(4):
                 p_channel = p[i]
                 imageid_classid = file + '_' + str(i + 1)
                 p_channel = (p_channel > thresholds[i]).astype(np.uint8)
                 if p_channel.sum() < min_area[i]:
                     p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
-
+                # Save channel to obtain all channels for metrics calculation
+                p_img.append(p_channel)
                 res.append({
                     'ImageId_ClassId': imageid_classid,
                     'EncodedPixels': mask2rle(p_channel)
                 })
 
-df = pd.DataFrame(res)
-df.to_csv('submission.csv', index=False)
+            p_img = np.array(p_img)
+            # Make it seem like a batch of 1
+            p_img = torch.tensor(p_img[np.newaxis, :])
+            if single_channel:
+                dice_score_list.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
+            else:
+                dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
+            iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
+
+
+dice = np.mean(dice_score_list)
+iou = np.nanmean(iou_score_list)
+print(dice, iou)
 
 df = pd.DataFrame(res)
 df = df.fillna('')

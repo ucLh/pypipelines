@@ -1,3 +1,4 @@
+import enum
 import warnings
 warnings.filterwarnings('ignore')
 import os
@@ -7,6 +8,7 @@ import cv2
 import albumentations as A
 from tqdm import tqdm
 import pandas as pd
+from prettytable import PrettyTable
 
 import torch
 import torch.nn as nn
@@ -35,6 +37,13 @@ class Model:
                 res.append(m(x))
         res = torch.stack(res)
         return torch.mean(res, dim=0)
+
+
+class ModelNames(enum.Enum):
+    eff_net = 'effnetb7'
+    se_resnext50 = 'unet_se_resnext50'
+    resnet34 = 'unet_resnet34'
+    mobilenet2 = 'unet_mobilenet2'
 
 
 def create_transforms(additional):
@@ -127,9 +136,11 @@ unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
 unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
 eff_net = load('../ckpt/traced_effnetb7_1024_best.pth').cuda()
 
-models = [eff_net, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
-for m in models:
-    m.eval()
+models_list = [eff_net, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
+models_dict = {}
+for i, model_name in enumerate(ModelNames):
+    models_list[i].eval()
+    models_dict[model_name.value] = models_list[i]
 
 # Different transforms for TTA wrapper
 transforms = [
@@ -142,12 +153,18 @@ transforms = [create_transforms(t) for t in transforms]
 datasets = [TtaWrap(ImageDataset(img_folder=img_folder, transforms=t), tfms=t) for t in transforms]
 loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle=False) for d in datasets]
 
-dice_list, iou_list = [], []
-for model in models:
-    dice, iou, res = calculate_dice_and_iou(model)
+table = PrettyTable()
+table.field_names = ['Model', 'dice', 'iou']
+
+dice_dict, iou_dict = {}, {}
+for key in models_dict.keys():
+    dice, iou, res = calculate_dice_and_iou(models_dict[key])
     print(dice, iou)
-    dice_list.append(dice)
-    iou_list.append(iou)
+    table.add_row([key, dice, iou])
+    dice_dict[key] = dice
+    iou_dict[key] = iou
+
+print(table)
 
 df = pd.DataFrame(res)
 df = df.fillna('')

@@ -50,62 +50,13 @@ def create_transforms(additional):
     return res
 
 
-def tta_mean(preds):
-    preds = torch.stack(preds)
-    preds = torch.mean(preds, dim=0)
-    return preds.detach().cpu().numpy()
+def calculate_dice_and_iou(model):
+    def tta_mean(preds):
+        preds = torch.stack(preds)
+        preds = torch.mean(preds, dim=0)
+        return preds.detach().cpu().numpy()
 
-
-# unet_se_resnext50_32x4d = \
-#     load('../data/severstalmodels/se_resnext50_32x4d.pth').cuda()
-# unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
-# unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
-eff_net = load('../ckpt/traced_effnetb7_1024_best.pth').cuda()
-
-model = eff_net
-model.eval()
-
-img_folder = '../data/cropped/'
-batch_size = 1
-num_workers = 0
-single_channel = False
-
-# Different transforms for TTA wrapper
-transforms = [
-    [],
-    [A.HorizontalFlip(p=1)],
-    # [A.VerticalFlip(p=1)],
-]
-
-transforms = [create_transforms(t) for t in transforms]
-datasets = [TtaWrap(ImageDataset(img_folder=img_folder, transforms=t), tfms=t) for t in transforms]
-loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle=False) for d in datasets]
-
-mask_df = pd.read_csv('../data/cropped.csv')
-thresholds = [0.5, 0.5, 0.5, 0.5]
-min_area = [600, 600, 1000, 2000]
-
-res = []
-dice_score_list, iou_score_list = [], []
-# Iterate over all TTA loaders
-total = len(datasets[0]) // batch_size
-with torch.no_grad():
-    for j, loaders_batch in enumerate(tqdm(zip(*loaders), total=total)):
-        preds = []
-        image_file = []
-        for i, batch in enumerate(loaders_batch):
-            features = batch['features'].cuda()
-            output = model(features)
-            p = torch.sigmoid(output)
-            # inverse operations for TTA
-            p = datasets[i].inverse(p)
-            preds.append(p)
-            image_file = batch['image_file']
-
-        # TTA mean
-        preds = tta_mean(preds)
-
-        # Batch post processing
+    def batch_postprocessing():
         for p, file in zip(preds, image_file):
             file = os.path.basename(file)
             # Image postprocessing
@@ -134,10 +85,69 @@ with torch.no_grad():
                 dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
             iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
 
+            return dice_score_list, iou_score_list
 
-dice = np.mean(dice_score_list)
-iou = np.nanmean(iou_score_list)
-print(dice, iou)
+    res, dice_score_list, iou_score_list = [], [], []
+    total = len(datasets[0]) // batch_size
+    with torch.no_grad():
+        for j, loaders_batch in enumerate(tqdm(zip(*loaders), total=total)):
+            preds = []
+            image_file = []
+            for i, batch in enumerate(loaders_batch):
+                features = batch['features'].cuda()
+                output = model(features)
+                p = torch.sigmoid(output)
+                # inverse operations for TTA
+                p = datasets[i].inverse(p)
+                preds.append(p)
+                image_file = batch['image_file']
+
+            # TTA mean
+            preds = tta_mean(preds)
+
+            # Batch post processing
+            dice_score_list, iou_score_list = batch_postprocessing()
+
+    dice = np.mean(dice_score_list)
+    iou = np.nanmean(iou_score_list)
+    return dice, iou, res
+
+
+img_folder = '../data/cropped/'
+mask_df = pd.read_csv('../data/cropped.csv')
+batch_size = 1
+num_workers = 0
+thresholds = [0.5, 0.5, 0.5, 0.5]
+min_area = [600, 600, 1000, 2000]
+single_channel = False
+
+unet_se_resnext50_32x4d = \
+    load('../data/severstalmodels/se_resnext50_32x4d.pth').cuda()
+unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
+unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
+eff_net = load('../ckpt/traced_effnetb7_1024_best.pth').cuda()
+
+models = [eff_net, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
+for m in models:
+    m.eval()
+
+# Different transforms for TTA wrapper
+transforms = [
+    [],
+    [A.HorizontalFlip(p=1)],
+    # [A.VerticalFlip(p=1)],
+]
+
+transforms = [create_transforms(t) for t in transforms]
+datasets = [TtaWrap(ImageDataset(img_folder=img_folder, transforms=t), tfms=t) for t in transforms]
+loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle=False) for d in datasets]
+
+dice_list, iou_list = [], []
+for model in models:
+    dice, iou, res = calculate_dice_and_iou(model)
+    print(dice, iou)
+    dice_list.append(dice)
+    iou_list.append(iou)
 
 df = pd.DataFrame(res)
 df = df.fillna('')

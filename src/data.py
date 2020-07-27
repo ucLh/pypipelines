@@ -2,6 +2,7 @@ import os
 
 import cv2
 from sklearn.model_selection import train_test_split
+import torch
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
@@ -94,9 +95,20 @@ class SteelDataset(Dataset):
         return img_tensor[np.newaxis, ...]
 
 
+class SteelClassify(SteelDataset):
+    def __getitem__(self, idx):
+        img, mask = super(SteelDataset, self).__getitem__(idx)
+        if np.count_nonzero(mask):
+            label = torch.ones(1)
+        else:
+            label = torch.zeros(1)
+
+        return img, label
+
+
 def get_transforms(phase, mean, std):
     list_transforms = list()
-    # list_transforms.append(RandomCrop(256, 512, p=1))
+    list_transforms.append(RandomCrop(256, 512, p=1))
     # list_transforms.append(Resize(256, 1024, p=1))
     if phase == "train":
         list_transforms.extend(
@@ -157,3 +169,43 @@ def visualize(**images):
         plt.title(' '.join(name.split('_')).title())
         plt.imshow(image)
     plt.show()
+
+
+def shuffle_minibatch(inputs, masks, mixup=True):
+    """Shuffle a minibatch and do linear interpolation between images and labels.
+    Args:
+        inputs: a numpy array of images with size batch_size x H x W x 3.
+        targets: a numpy array of masks with size batch_size x 4 x H x W.
+        mixup: a boolen as whether to do mixup or not. If mixup is True, we
+            sample the weight from beta distribution using parameter alpha=1,
+            beta=1. If mixup is False, we set the weight to be 1 and 0
+            respectively for the randomly shuffled mini-batches.
+    """
+    batch_size = inputs.shape[0]
+    rp1 = torch.randperm(batch_size)
+    inputs1 = inputs[rp1]
+    masks1 = masks[rp1]
+
+    rp2 = torch.randperm(batch_size)
+    inputs2 = inputs[rp2]
+    masks2 = masks[rp2]
+
+    if mixup is True:
+        a = np.random.beta(0.4, 0.4, [batch_size, 1])
+    else:
+        a = np.ones((batch_size, 1))
+
+    b = np.tile(a[..., None, None], [1, 3, 256, 512])
+    c = np.tile(a[..., None, None], [1, 4, 256, 512])
+
+    inputs1 = inputs1 * torch.from_numpy(b).float()
+    inputs2 = inputs2 * torch.from_numpy(1 - b).float()
+
+    masks1 = masks1 * torch.from_numpy(c).float()
+    masks2 = masks2 * torch.from_numpy(1-c).float()
+
+    inputs_shuffle = inputs1 + inputs2
+    targets_shuffle = masks1 + masks2
+
+    return inputs_shuffle, targets_shuffle
+

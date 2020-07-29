@@ -1,3 +1,4 @@
+from enum import Enum
 import os
 
 import cv2
@@ -12,6 +13,10 @@ from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop,
                             RandomBrightnessContrast, Resize, ImageOnlyTransform)
 from albumentations.pytorch import ToTensor
 
+
+class DatasetTypes(Enum):
+    Seg_dataset = 'SteelDataset'
+    Cls_dataset = 'ClassifyDataset'
 
 def mask2rle(img):
     '''
@@ -97,11 +102,18 @@ class SteelDataset(Dataset):
 
 class SteelClassify(SteelDataset):
     def __getitem__(self, idx):
-        img, mask = super(SteelDataset, self).__getitem__(idx)
+        image_id, mask = make_mask(idx, self.df)
+        image_path = os.path.join(self.root, image_id)
+        img = cv2.imread(image_path)
+        augmented = self.transforms(image=img, mask=mask)
+        img = augmented['image']
+        # img = self._tensor_to_grayscale(img)
+        mask = augmented['mask']  # 1x256x1600x4
+        mask = mask[0].permute(2, 0, 1)  # 4x256x1600
         if np.count_nonzero(mask):
-            label = torch.ones(1)
+            label = torch.ones(1, dtype=torch.long)
         else:
-            label = torch.zeros(1)
+            label = torch.zeros(1, dtype=torch.long)
 
         return img, label
 
@@ -146,12 +158,12 @@ def provider(
 
     train_df, val_df = train_test_split(df, test_size=0.2, stratify=df["defects"], random_state=69)
     df = train_df if phase == "train" else val_df
-    image_dataset = SteelDataset(df, data_folder, mean, std, phase)
+    image_dataset = SteelClassify(df, data_folder, mean, std, phase)
     dataloader = DataLoader(
         image_dataset,
         batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=True,
+        num_workers=0,
+        pin_memory=False,
         shuffle=True,
     )
     return dataloader

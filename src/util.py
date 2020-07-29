@@ -109,7 +109,7 @@ class MetricsLogger:
         logger.addHandler(handler1)
         return logger
 
-    def epoch_log(self, phase, epoch, epoch_loss, meter, start, log_dir='../logs'):
+    def seg_epoch_log(self, phase, epoch, epoch_loss, meter, start, log_dir='../logs'):
         '''logging the metrics at the end of an epoch'''
         dices, iou = meter.get_metrics()
         dice, dice_neg, dice_pos = dices
@@ -122,6 +122,12 @@ class MetricsLogger:
                   f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
                   f"dice_pos: {dice_pos:.4f}")
         return dice, iou
+
+    def cls_epoch_log(self, phase, epoch, epoch_loss):
+        if phase == 'val':
+            self.logger.info(f"Epoch: {epoch}| Loss: {epoch_loss:.4f}")
+        else:
+            print(f"Epoch: {epoch}| Loss: {epoch_loss:.4f}")
 
 
 def compute_ious(pred, label, classes, ignore_index=255, only_present=True):
@@ -150,3 +156,9 @@ def compute_iou_batch(outputs, labels, classes=None):
         ious.append(np.nanmean(compute_ious(pred, label, classes)))
     iou = np.nanmean(ious)
     return iou
+
+def set_parameter_requires_grad(model, feature_extracting=True):
+    if feature_extracting:
+        for param in model.parameters():
+            param.requires_grad = False
+

@@ -1,7 +1,9 @@
 import warnings
 warnings.filterwarnings('ignore')
+import argparse
 import enum
 import os
+import sys
 
 
 import numpy as np
@@ -41,7 +43,8 @@ class Model:
 
 
 class ModelNames(enum.Enum):
-    eff_net = 'effnetb7'
+    eff_net_v2 = 'effnetb7_mixup_v2'
+    eff_net = 'effnetb7_mixup'
     se_resnext50 = 'unet_se_resnext50'
     resnet34 = 'unet_resnet34'
     mobilenet2 = 'unet_mobilenet2'
@@ -60,7 +63,7 @@ def create_transforms(additional):
     return res
 
 
-def calculate_dice_and_iou(model):
+def calculate_dice_and_iou(model, datasets, loaders, mask_df, thresholds, min_area):
     def tta_mean(preds):
         preds = torch.stack(preds)
         preds = torch.mean(preds, dim=0)
@@ -95,7 +98,7 @@ def calculate_dice_and_iou(model):
             iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
 
     res, dice_score_list, dice_score_list_ch, iou_score_list = [], [], [], []
-    total = len(datasets[0]) // batch_size
+    total = len(datasets[0]) // 1  # Todo: Add batch size
     with torch.no_grad():
         for j, loaders_batch in enumerate(tqdm(zip(*loaders), total=total)):
             preds = []
@@ -121,57 +124,78 @@ def calculate_dice_and_iou(model):
     return dice, dice_ch, iou, res
 
 
-img_folder = '../data/cropped/'
-mask_df = pd.read_csv('../data/cropped.csv')
-batch_size = 1
-num_workers = 0
-thresholds = [0.5, 0.5, 0.5, 0.5]
-min_area = [600, 600, 1000, 2000]
+def main(args):
+    img_folder = args.img_folder
+    mask_df = pd.read_csv(args.mask_df)
+    batch_size = 1
+    num_workers = 0
+    thresholds = [0.5, 0.5, 0.5, 0.5]
+    min_area = [600, 600, 1000, 2000]
 
-unet_se_resnext50_32x4d = \
-    load('../data/severstalmodels/se_resnext50_32x4d.pth').cuda()
-unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
-unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
-eff_net = load('../ckpt/traced_effnetb7_1024_best.pth').cuda()
+    unet_se_resnext50_32x4d = \
+        load('../data/severstalmodels/se_resnext50_32x4d.pth').cuda()
+    unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
+    unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
+    eff_net_v2 = load('../ckpt/traced_effnetb7_1024_mixup_v2.pth').cuda()
+    eff_net = load('../ckpt/traced_effnetb7_1024_mixup.pth').cuda()
 
-models_list = [eff_net, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
-models_dict = {}
-for i, model_name in enumerate(ModelNames):
-    models_list[i].eval()
-    models_dict[model_name.value] = models_list[i]
+    models_list = [eff_net_v2, eff_net, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
+    models_dict = {}
+    for i, model_name in enumerate(ModelNames):
+        models_list[i].eval()
+        models_dict[model_name.value] = models_list[i]
 
-# Different transforms for TTA wrapper
-transforms = [
-    [],
-    [A.HorizontalFlip(p=1)],
-    # [A.VerticalFlip(p=1)],
-]
+    # Different transforms for TTA wrapper
+    transforms = [
+        [],
+        [A.HorizontalFlip(p=1)],
+        # [A.VerticalFlip(p=1)],
+    ]
 
-transforms = [create_transforms(t) for t in transforms]
-datasets = [TtaWrap(ImageDataset(img_folder=img_folder, transforms=t), tfms=t) for t in transforms]
-loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle=False) for d in datasets]
+    transforms = [create_transforms(t) for t in transforms]
+    datasets = [TtaWrap(ImageDataset(img_folder=img_folder, transforms=t), tfms=t) for t in transforms]
+    loaders = [DataLoader(d, num_workers=num_workers, batch_size=batch_size, shuffle=False) for d in datasets]
 
-table = PrettyTable()
-table.field_names = ['Model', 'dice', 'iou']
+    table = PrettyTable()
+    table.field_names = ['Model', 'dice', 'iou']
 
-logger = MetricsLogger.config_logger('metric_scores', '../logs/scores.log')
+    logger = MetricsLogger.config_logger('metric_scores', '../logs/scores.log')
 
-dice_dict, iou_dict = {}, {}
-for key in models_dict.keys():
-    dice, dice_ch, iou, res = calculate_dice_and_iou(models_dict[key])
-    print(dice, iou)
-    table.add_row([key, dice, iou])
-    dice_dict[key] = dice
-    iou_dict[key] = iou
+    dice_dict, iou_dict = {}, {}
+    for key in models_dict.keys():
+        dice, dice_ch, iou, res = calculate_dice_and_iou(models_dict[key], datasets, loaders, mask_df, thresholds, min_area)
+        print(dice, iou)
+        table.add_row([key, dice, iou])
+        dice_dict[key] = dice
+        iou_dict[key] = iou
 
-logger.info(table)
+    logger.info(table)
 
-df = pd.DataFrame(res)
-df = df.fillna('')
-df.to_csv('submission.csv', index=False)
+    df = pd.DataFrame(res)
+    df = df.fillna('')
+    df.to_csv('submission.csv', index=False)
 
-df['Image'] = df['ImageId_ClassId'].map(lambda x: x.split('_')[0])
-df['Class'] = df['ImageId_ClassId'].map(lambda x: x.split('_')[1])
-df['empty'] = df['EncodedPixels'].map(lambda x: not x)
-classes = df[df['empty'] == False]['Class'].value_counts()
-print(classes)
+    df['Image'] = df['ImageId_ClassId'].map(lambda x: x.split('_')[0])
+    df['Class'] = df['ImageId_ClassId'].map(lambda x: x.split('_')[1])
+    df['empty'] = df['EncodedPixels'].map(lambda x: not x)
+    classes = df[df['empty'] == False]['Class'].value_counts()
+    print(classes)
+
+
+def parse_arguments(argv):
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--img_folder', type=str,
+                        help='Path to (.pth) file',
+                        default='../data/cropped/')
+    parser.add_argument('--mask_df', type=str,
+                        help='Model backend',
+                        default='../data/cropped.csv')
+    parser.add_argument('--log_dir', type=str,
+                        help='Directory where to write event logs.',
+                        default='../testing_results')
+    return parser.parse_args(argv)
+
+
+if __name__ == '__main__':
+    main(parse_arguments(sys.argv[1:]))

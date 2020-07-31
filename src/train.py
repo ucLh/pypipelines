@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 # from torchtools.optim import RangerLars
 
 from data import provider, visualize, shuffle_minibatch
-from util import Meter, MetricsLogger
+from util import Meter, MetricsLogger, set_parameter_requires_grad
 
 
 class Flatten(nn.Module):
@@ -25,7 +25,7 @@ class Flatten(nn.Module):
 
 
 class ClassifierNew(nn.Module):
-    def __init__(self, encoder, inp=515, h1=1024, out=2, d=0.35):
+    def __init__(self, encoder, inp=643, h1=1024, out=2, d=0.5):
         super().__init__()
         self.ap = nn.AdaptiveAvgPool2d((1, 1))
         self.mp = nn.AdaptiveMaxPool2d((1, 1))
@@ -57,10 +57,10 @@ class Trainer(object):
     '''This class takes care of training and validation of our model'''
     def __init__(self, model, checkpont):
         self.num_workers = 6
-        self.batch_size = {"train": 4, "val": 4}
+        self.batch_size = {"train": 32, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
         self.lr = 8e-5
-        self.num_epochs = 80
+        self.num_epochs = 200
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
@@ -75,21 +75,20 @@ class Trainer(object):
         if checkpont is not None:
             self.net.load_state_dict(checkpont["state_dict"])
             # self.optimizer.load_state_dict(checkpont["optimizer"])
-            # try:
-            #     self.scheduler.load_state_dict(checkpont["scheduler"])
-            # except:
-            #     print("No scheduler")
-            #     pass
+            try:
+                self.scheduler.load_state_dict(checkpont["scheduler"])
+            except:
+                print("No scheduler")
+                pass
             self.start_epoch = checkpont["epoch"]
             self.best_dice = checkpont["best_dice"]
-            # try:
-            #     self.best_loss = checkpont["best_loss"]
-            #     print('***Best loss*** ', self.best_loss)
-            # except:
-            #     print("No best_loss")
-            #     pass
-        self.classifier = ClassifierNew(self.net.encoder)
-        self.classifier.to(self.device)
+            try:
+                self.best_loss = checkpont["best_loss"]
+                print('***Best loss*** ', self.best_loss)
+            except:
+                print("No best_loss")
+                pass
+        set_parameter_requires_grad(self.net.encoder)
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.criterion_cls = torch.nn.CrossEntropyLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
@@ -134,7 +133,7 @@ class Trainer(object):
             images, targets = batch
             # if phase == "train":
             #     images, targets = shuffle_minibatch(images, targets)
-            loss, outputs = self.forward(images, targets, self.classifier, self.criterion_cls)
+            loss, outputs = self.forward(images, targets, self.net, self.criterion_cls)
             loss = loss / self.accumulation_steps
             if phase == "train":
                 loss.backward()
@@ -153,7 +152,7 @@ class Trainer(object):
 
     def start(self):
         for epoch in range(self.start_epoch, self.num_epochs):
-            self.iterate(epoch, "train", self.classifier)
+            self.iterate(epoch, "train", self.net)
             state = {
                 "epoch": epoch,
                 "best_dice": self.best_dice,
@@ -163,7 +162,7 @@ class Trainer(object):
                 "scheduler": self.scheduler.state_dict(),
             }
             with torch.no_grad():
-                val_loss = self.iterate(epoch, "val", self.classifier)
+                val_loss = self.iterate(epoch, "val", self.net)
                 self.scheduler.step(val_loss)
             if val_loss <= self.best_loss:
                 print("******** New optimal found, saving state ********")
@@ -185,13 +184,14 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     if os.path.isfile(args.model):
-        model = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None)
+        model_seg = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None)
+        model_cls = ClassifierNew(model_seg.encoder)
         ckpt = torch.load(args.model)
         print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
     else:
         model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None)
 
-    model_trainer = Trainer(model, ckpt)
+    model_trainer = Trainer(model_cls, ckpt)
     # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')
@@ -220,10 +220,10 @@ def parse_arguments(argv):
 
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
-                        default='./model.pth')
+                        default='model.pth')
     parser.add_argument('--backend', type=str,
                         help='Model backend',
-                        default='efficientnet-b5')
+                        default='efficientnet-b7')
     parser.add_argument('--log_dir', type=str,
                         help='Directory where to write event logs.',
                         default='../testing_results')

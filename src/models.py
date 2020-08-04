@@ -9,7 +9,7 @@ class Flatten(nn.Module):
 
 
 class ClassifierNew(nn.Module):
-    def __init__(self, encoder, inp=643, h1=1024, out=2, d=0.5):
+    def __init__(self, inp=1280, h1=2048, out=2, d=0.75):
         super().__init__()
         self.ap = nn.AdaptiveAvgPool2d((1, 1))
         self.mp = nn.AdaptiveMaxPool2d((1, 1))
@@ -20,11 +20,9 @@ class ClassifierNew(nn.Module):
         self.bn1 = nn.BatchNorm1d(h1, eps=1e-05, momentum=0.1, affine=True)
         self.dropout1 = nn.Dropout(d)
         self.fc2 = nn.Linear(h1, out)
-        self.encoder = encoder
 
     def forward(self, x):
-        features = self.encoder(x)[-1]
-        ap = self.ap(features)
+        ap = self.ap(x)
         mp = self.mp(x)
         x = torch.cat((ap, mp), dim=1)
         x = self.fla(x)

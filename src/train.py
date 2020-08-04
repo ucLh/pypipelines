@@ -14,14 +14,14 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmResta
 from torch.utils.tensorboard import SummaryWriter
 # from torchtools.optim import RangerLars
 
-from data import provider, visualize, shuffle_minibatch
+from data import provider, visualize, shuffle_minibatch_onehot
 from models import ClassifierNew
 from util import Meter, MetricsLogger, set_parameter_requires_grad
 
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, model, checkpont):
+    def __init__(self, encoder, model, checkpont):
         self.num_workers = 6
         self.batch_size = {"train": 32, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
@@ -35,6 +35,9 @@ class Trainer(object):
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
         self.net = self.net.to(self.device)
+        self.encoder = encoder
+        self.encoder = self.encoder.to(self.device)
+        set_parameter_requires_grad(self.encoder)
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
@@ -48,13 +51,12 @@ class Trainer(object):
                 pass
             self.start_epoch = checkpont["epoch"]
             self.best_dice = checkpont["best_dice"]
-            try:
-                self.best_loss = checkpont["best_loss"]
-                print('***Best loss*** ', self.best_loss)
-            except:
-                print("No best_loss")
-                pass
-        set_parameter_requires_grad(self.net.encoder)
+            # try:
+            #     self.best_loss = checkpont["best_loss"]
+            #     print('***Best loss*** ', self.best_loss)
+            # except:
+            #     print("No best_loss")
+            #     pass
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.criterion_cls = torch.nn.CrossEntropyLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
@@ -80,7 +82,8 @@ class Trainer(object):
     def forward(self, images, targets, net, criterion):
         images = images.to(self.device)
         masks = targets.to(self.device)
-        outputs = net(images)
+        features = self.encoder(images)
+        outputs = net(features[-1])
         # print(outputs[-1].view(outputs[-1].size(0), -1).shape)
         masks.squeeze_()
         loss = criterion(outputs, masks)
@@ -98,8 +101,10 @@ class Trainer(object):
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
             images, targets = batch
             # if phase == "train":
-            #     images, targets = shuffle_minibatch(images, targets)
-            loss, outputs = self.forward(images, targets, self.net, self.criterion_cls)
+            #     images, targets = shuffle_minibatch_onehot(images.cpu(), targets.cpu())
+            # else:
+            #     images, targets = shuffle_minibatch_onehot(images.cpu(), targets.cpu(), mixup=False)
+            loss, outputs = self.forward(images.cuda(), targets.cuda(), self.net, self.criterion_cls)
             loss = loss / self.accumulation_steps
             if phase == "train":
                 loss.backward()
@@ -148,16 +153,15 @@ def prepare_and_visualize(image, mask):
 
 
 def main(args):
+    model_seg = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None)
+    ckpt_seg = torch.load("../ckpt/effnetb7_1024_mixup_v2.pth")
+    model_seg.load_state_dict(ckpt_seg["state_dict"])
     ckpt = None
-    if os.path.isfile(args.model):
-        model_seg = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None)
-        ckpt = torch.load(args.model)
-        print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
-    else:
-        model_seg = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None)
+    # ckpt = torch.load(args.model)
+    # print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
 
-    model_cls = ClassifierNew(model_seg.encoder)
-    model_trainer = Trainer(model_cls, ckpt)
+    model_cls = ClassifierNew()
+    model_trainer = Trainer(model_seg.encoder, model_cls, ckpt)
     # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')

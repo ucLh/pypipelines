@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import segmentation_models_pytorch as smp
 
 
 class Flatten(nn.Module):
@@ -35,6 +36,32 @@ class ClassifierNew(nn.Module):
 
         return x
 
+
+class Encoder(smp.Unet):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decoder = nn.Module()
+        self.segmentation_head = nn.Module()
+
+    def forward(self, x):
+        """Sequentially pass `x` trough model`s encoder, decoder and heads"""
+        features = self.encoder(x)
+        labels = self.classification_head(features[-1])
+        return labels, features
+
+
+class Decoder(smp.Unet):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.encoder = nn.Module()
+        self.classification_head = nn.Module()
+
+    def forward(self, *x):
+        decoder_output = self.decoder(*x)
+        masks = self.segmentation_head(decoder_output)
+        return masks
 
 # class SegmentationHead(nn.Module):
 #     def __init__(self, encoder, decoder, segmentation_head):

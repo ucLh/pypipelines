@@ -1,4 +1,5 @@
 from enum import Enum
+import math
 import os
 
 import cv2
@@ -17,6 +18,7 @@ from albumentations.pytorch import ToTensor
 class DatasetTypes(Enum):
     Seg_dataset = 'SteelDataset'
     Cls_dataset = 'ClassifyDataset'
+
 
 def mask2rle(img):
     '''
@@ -38,7 +40,7 @@ def make_mask(row_id, df):
     # 4:class 1～4 (ch:0～3)
 
     for idx, label in enumerate(labels.values):
-        if label is not np.nan:
+        if isinstance(label, str):
             label = label.split(" ")
             positions = map(int, label[0::2])
             length = map(int, label[1::2])
@@ -47,6 +49,15 @@ def make_mask(row_id, df):
                 mask[pos:(pos + le)] = 1
             masks[:, :, idx] = mask.reshape((256, 1600), order='F')
     return fname, masks
+
+
+def make_label(mask):
+    if np.count_nonzero(mask):
+        label = torch.ones(1, dtype=torch.long).cpu()
+    else:
+        label = torch.zeros(1, dtype=torch.long).cpu()
+    return label
+
 
 
 def make_mask_custom(row_id, df):
@@ -110,12 +121,9 @@ class SteelClassify(SteelDataset):
         # img = self._tensor_to_grayscale(img)
         mask = augmented['mask']  # 1x256x1600x4
         mask = mask[0].permute(2, 0, 1)  # 4x256x1600
-        if np.count_nonzero(mask):
-            label = torch.ones(1, dtype=torch.long)
-        else:
-            label = torch.zeros(1, dtype=torch.long)
+        label = make_label(mask)
 
-        return img, label
+        return img, mask, label
 
 
 def get_transforms(phase, mean, std):
@@ -163,8 +171,8 @@ def provider(
     dataloader = DataLoader(
         image_dataset,
         batch_size=batch_size,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=True,
         shuffle=True,
     )
     return dataloader

@@ -9,24 +9,23 @@ import segmentation_models_pytorch as smp
 import torch
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
-
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 from torch.utils.tensorboard import SummaryWriter
+from torch.multiprocessing import set_start_method
 # from torchtools.optim import RangerLars
 
-from data import provider, visualize, shuffle_minibatch_onehot
-from models import ClassifierNew
-from util import Meter, MetricsLogger, set_parameter_requires_grad
+from data import provider, visualize, shuffle_minibatch
+from util import Meter, MetricsLogger
 
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, encoder, model, checkpont):
+    def __init__(self, model, checkpont):
         self.num_workers = 6
-        self.batch_size = {"train": 32, "val": 4}
+        self.batch_size = {"train": 2, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
         self.lr = 8e-5
-        self.num_epochs = 200
+        self.num_epochs = 80
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
@@ -35,32 +34,30 @@ class Trainer(object):
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
         self.net = self.net.to(self.device)
-        self.encoder = encoder
-        self.encoder = self.encoder.to(self.device)
-        set_parameter_requires_grad(self.encoder)
-        self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
+        self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr), opt_level="O1")
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
         if checkpont is not None:
             self.net.load_state_dict(checkpont["state_dict"])
-            # self.optimizer.load_state_dict(checkpont["optimizer"])
+            self.optimizer.load_state_dict(checkpont["optimizer"])
             try:
                 self.scheduler.load_state_dict(checkpont["scheduler"])
             except:
                 print("No scheduler")
                 pass
+            amp.load_state_dict(checkpont["amp"])
             self.start_epoch = checkpont["epoch"]
             self.best_dice = checkpont["best_dice"]
-            # try:
-            #     self.best_loss = checkpont["best_loss"]
-            #     print('***Best loss*** ', self.best_loss)
-            # except:
-            #     print("No best_loss")
-            #     pass
+            try:
+                self.best_loss = checkpont["best_loss"]
+                print('***Best loss*** ', self.best_loss)
+            except:
+                print("No best_loss")
+                pass
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.criterion_cls = torch.nn.CrossEntropyLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
-        cudnn.benchmark = False
+        cudnn.benchmark = True
         self.dataloaders = {
             phase: provider(
                 data_folder='../data/Severstal/train_images/',
@@ -79,61 +76,83 @@ class Trainer(object):
         self.logger = MetricsLogger()
         self.tensorboard_writer = SummaryWriter("../logs/runs")
 
-    def forward(self, images, targets, net, criterion):
+    def forward(self, images, target_masks, target_lables):
         images = images.to(self.device)
-        masks = targets.to(self.device)
-        features = self.encoder(images)
-        outputs = net(features[-1])
-        # print(outputs[-1].view(outputs[-1].size(0), -1).shape)
-        masks.squeeze_()
-        loss = criterion(outputs, masks)
-        return loss, outputs
+        masks = target_masks.to(self.device)
+        labels = target_lables.to(self.device)
+        labels.squeeze_()
+        masks_pred, labels_pred = self.net(images)
+        loss_a = self.criterion(masks_pred, masks)
+        loss_b = self.criterion_cls(labels_pred, labels)
+        return loss_a, loss_b, masks_pred
 
-    def iterate(self, epoch, phase, net):
+    def postprocess_losses(self, losses, total_batches):
+        res = []
+        for l in losses:
+            l = (l * self.accumulation_steps) / total_batches
+            res.append(l)
+        return res
+
+    def iterate(self, epoch, phase):
+        meter = Meter(phase, epoch)
         start = time.strftime("%H:%M:%S")
         print(f"Starting epoch: {epoch} | phase: {phase} | ⏰: {start}")
-        net.train(phase == "train")
+        batch_size = self.batch_size[phase]
+        self.net.train(phase == "train")
         dataloader = self.dataloaders[phase]
-        running_loss = 0.0
+        running_loss, rn_loss_seg, rn_loss_cls = 0.0, 0.0, 0.0
         total_batches = len(dataloader)
         #         tk0 = tqdm(dataloader, total=total_batches)
         self.optimizer.zero_grad()
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
-            images, targets = batch
+            images, masks, labels = batch
             # if phase == "train":
-            #     images, targets = shuffle_minibatch_onehot(images.cpu(), targets.cpu())
-            # else:
-            #     images, targets = shuffle_minibatch_onehot(images.cpu(), targets.cpu(), mixup=False)
-            loss, outputs = self.forward(images.cuda(), targets.cuda(), self.net, self.criterion_cls)
-            loss = loss / self.accumulation_steps
+            #     images, masks = shuffle_minibatch(images, masks)
+            loss_seg, loss_cls, outputs = self.forward(images, masks, labels)
+            loss_cls /= self.accumulation_steps
+            loss_seg /= self.accumulation_steps
+            loss = loss_seg + loss_cls
+            # self.tensorboard_writer.add_scalar('Loss/iter', loss, itr * (epoch + 1))
             if phase == "train":
-                loss.backward()
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
                 if (itr + 1) % self.accumulation_steps == 0:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
             running_loss += loss.item()
+            rn_loss_seg += loss_seg.item()
+            rn_loss_cls += loss_cls.item()
+            outputs = outputs.detach().cpu()
+            meter.update(masks, outputs)
         #             tk0.set_postfix(loss=(running_loss / ((itr + 1))))
-        epoch_loss = (running_loss * self.accumulation_steps) / total_batches
-        self.logger.cls_epoch_log(phase, epoch, epoch_loss)
+        epoch_loss_list = self.postprocess_losses((running_loss, rn_loss_seg, rn_loss_cls), total_batches)
+        epoch_loss = epoch_loss_list[0]
+        dice, iou = self.logger.epoch_log(phase, epoch, epoch_loss_list, meter, start)
         self.tensorboard_writer.add_scalar('Loss/' + phase, epoch_loss, epoch)
+        self.tensorboard_writer.add_scalar('Dice/' + phase, dice, epoch)
+        self.tensorboard_writer.add_scalar('Iou/' + phase, iou, epoch)
         self.losses[phase].append(epoch_loss)
+        self.dice_scores[phase].append(dice)
+        self.iou_scores[phase].append(iou)
         print('Learning rate: ', self.optimizer.param_groups[0]['lr'])
         torch.cuda.empty_cache()
-        return epoch_loss
+        return epoch_loss, dice
 
     def start(self):
+        # self.tensorboard_writer.add_graph(self.net, self.dataloaders["train"].dataset[0])
         for epoch in range(self.start_epoch, self.num_epochs):
-            self.iterate(epoch, "train", self.net)
+            self.iterate(epoch, "train")
             state = {
                 "epoch": epoch,
                 "best_dice": self.best_dice,
                 "best_loss": self.best_loss,
                 "state_dict": self.net.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
+                "amp": amp.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
             }
             with torch.no_grad():
-                val_loss = self.iterate(epoch, "val", self.net)
+                val_loss, val_dice = self.iterate(epoch, "val")
                 self.scheduler.step(val_loss)
             if val_loss <= self.best_loss:
                 print("******** New optimal found, saving state ********")
@@ -148,20 +167,22 @@ class Trainer(object):
 def prepare_and_visualize(image, mask):
     image = np.transpose(image, [1, 2, 0])
     mask = np.transpose(mask, [1, 2, 0])
+    # print(image.shape, mask.shape)
     for i in range(4):
         visualize(image=image[:, :, 0], mask=mask[:, :, i])
 
 
 def main(args):
-    model_seg = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None)
-    ckpt_seg = torch.load("../ckpt/effnetb7_1024_mixup_v2.pth")
-    model_seg.load_state_dict(ckpt_seg["state_dict"])
     ckpt = None
-    # ckpt = torch.load(args.model)
-    # print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
+    if os.path.isfile(args.model):
+        model = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None, )
+        ckpt = torch.load(args.model)
+        print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
+    else:
+        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+                         aux_params={'classes': 2, 'dropout': 0.5})
 
-    model_cls = ClassifierNew()
-    model_trainer = Trainer(model_seg.encoder, model_cls, ckpt)
+    model_trainer = Trainer(model, ckpt)
     # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')
@@ -188,12 +209,18 @@ def main(args):
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
 
+    # parser.add_argument('--data_root', type=str,
+    #                     help='Path to data directory which needs to be forward passed through the network',
+    #                     default='../datasets/queries')
+    # parser.add_argument('--df_root', type=str,
+    #                     help='Path to data directory which needs to be forward passed through the network',
+    #                     default='../datasets/queries')
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
-                        default='model.pth')
+                        default='./model.pth')
     parser.add_argument('--backend', type=str,
                         help='Model backend',
-                        default='efficientnet-b7')
+                        default='efficientnet-b5')
     parser.add_argument('--log_dir', type=str,
                         help='Directory where to write event logs.',
                         default='../testing_results')
@@ -201,4 +228,5 @@ def parse_arguments(argv):
 
 
 if __name__ == '__main__':
+    set_start_method('spawn')
     main(parse_arguments(sys.argv[1:]))

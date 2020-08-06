@@ -109,18 +109,20 @@ class MetricsLogger:
         logger.addHandler(handler1)
         return logger
 
-    def seg_epoch_log(self, phase, epoch, epoch_loss, meter, start, log_dir='../logs'):
+    def seg_epoch_log(self, phase, epoch, epoch_loss_list, meter, start, log_dir='../logs'):
         '''logging the metrics at the end of an epoch'''
+        overall_loss, loss_seg, loss_cls = epoch_loss_list
         dices, iou = meter.get_metrics()
         dice, dice_neg, dice_pos = dices
         if phase == 'val':
-            self.logger.info(f"Epoch: {epoch}| Loss: {epoch_loss:.4f} | IoU: {iou:.4f} | "
+            self.logger.info(f"Epoch: {epoch}| Loss: {overall_loss:.4f} | SegLoss: {loss_seg:.4f} | "
+                             f"ClsLoss: {loss_cls:.4f} | IoU: {iou:.4f} | "
                              f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
                              f"dice_pos: {dice_pos:.4f}")
         else:
-            print(f"Epoch: {epoch}| Loss: {epoch_loss:.4f} | IoU: {iou:.4f} | "
-                  f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
-                  f"dice_pos: {dice_pos:.4f}")
+            print(f"Epoch: {epoch}| Loss: {overall_loss:.4f} | SegLoss: {loss_seg:.4f} | "
+                  f"ClsLoss: {loss_cls:.4f} | IoU: {iou:.4f} | dice: {dice:.4f} | "
+                  f"dice_neg: {dice_neg:.4f} | dice_pos: {dice_pos:.4f}")
         return dice, iou
 
     def cls_epoch_log(self, phase, epoch, epoch_loss):

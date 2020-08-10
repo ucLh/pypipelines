@@ -20,15 +20,16 @@ from util import Meter, MetricsLogger
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, model, checkpont):
+    def __init__(self, model, checkpoint):
         self.num_workers = 6
-        self.batch_size = {"train": 2, "val": 4}
+        self.batch_size = {"train": 16, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
-        self.lr = 8e-5
+        self.lr = 1e-6
         self.num_epochs = 80
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
+        self.best_seg_loss = 1e6
         self.phases = ["train", "val"]
         self.device = torch.device("cuda:0")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
@@ -37,27 +38,19 @@ class Trainer(object):
         self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr), opt_level="O1")
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
-        if checkpont is not None:
-            self.net.load_state_dict(checkpont["state_dict"])
-            self.optimizer.load_state_dict(checkpont["optimizer"])
-            try:
-                self.scheduler.load_state_dict(checkpont["scheduler"])
-            except:
-                print("No scheduler")
-                pass
-            amp.load_state_dict(checkpont["amp"])
-            self.start_epoch = checkpont["epoch"]
-            self.best_dice = checkpont["best_dice"]
-            try:
-                self.best_loss = checkpont["best_loss"]
-                print('***Best loss*** ', self.best_loss)
-            except:
-                print("No best_loss")
-                pass
+        if checkpoint is not None:
+            self.net.load_state_dict(checkpoint["state_dict"])
+            # self.optimizer.load_state_dict(checkpoint["optimizer"])
+            # self.try_to_load(self.scheduler, checkpoint, "scheduler")
+            amp.load_state_dict(checkpoint["amp"])
+            self.start_epoch = checkpoint["epoch"]
+            self.best_dice = checkpoint["best_dice"]
+            self.best_loss = self.try_to_assign(checkpoint, "best_loss", self.best_loss)
+            self.best_seg_loss = self.try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
         self.criterion = torch.nn.BCEWithLogitsLoss()
-        self.criterion_cls = torch.nn.CrossEntropyLoss()
+        self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
-        cudnn.benchmark = True
+        cudnn.benchmark = False
         self.dataloaders = {
             phase: provider(
                 data_folder='../data/Severstal/train_images/',
@@ -97,12 +90,10 @@ class Trainer(object):
         meter = Meter(phase, epoch)
         start = time.strftime("%H:%M:%S")
         print(f"Starting epoch: {epoch} | phase: {phase} | ⏰: {start}")
-        batch_size = self.batch_size[phase]
         self.net.train(phase == "train")
         dataloader = self.dataloaders[phase]
         running_loss, rn_loss_seg, rn_loss_cls = 0.0, 0.0, 0.0
         total_batches = len(dataloader)
-        #         tk0 = tqdm(dataloader, total=total_batches)
         self.optimizer.zero_grad()
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
             images, masks, labels = batch
@@ -112,7 +103,6 @@ class Trainer(object):
             loss_cls /= self.accumulation_steps
             loss_seg /= self.accumulation_steps
             loss = loss_seg + loss_cls
-            # self.tensorboard_writer.add_scalar('Loss/iter', loss, itr * (epoch + 1))
             if phase == "train":
                 with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                     scaled_loss.backward()
@@ -124,7 +114,7 @@ class Trainer(object):
             rn_loss_cls += loss_cls.item()
             outputs = outputs.detach().cpu()
             meter.update(masks, outputs)
-        #             tk0.set_postfix(loss=(running_loss / ((itr + 1))))
+
         epoch_loss_list = self.postprocess_losses((running_loss, rn_loss_seg, rn_loss_cls), total_batches)
         epoch_loss = epoch_loss_list[0]
         dice, iou = self.logger.epoch_log(phase, epoch, epoch_loss_list, meter, start)
@@ -136,7 +126,7 @@ class Trainer(object):
         self.iou_scores[phase].append(iou)
         print('Learning rate: ', self.optimizer.param_groups[0]['lr'])
         torch.cuda.empty_cache()
-        return epoch_loss, dice
+        return epoch_loss, epoch_loss_list[1], dice
 
     def start(self):
         # self.tensorboard_writer.add_graph(self.net, self.dataloaders["train"].dataset[0])
@@ -146,22 +136,44 @@ class Trainer(object):
                 "epoch": epoch,
                 "best_dice": self.best_dice,
                 "best_loss": self.best_loss,
+                "best_seg_loss": self.best_seg_loss,
                 "state_dict": self.net.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "amp": amp.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
             }
             with torch.no_grad():
-                val_loss, val_dice = self.iterate(epoch, "val")
+                val_loss, val_seg_loss, val_dice = self.iterate(epoch, "val")
                 self.scheduler.step(val_loss)
             if val_loss <= self.best_loss:
                 print("******** New optimal found, saving state ********")
                 state["best_loss"] = self.best_loss = val_loss
                 torch.save(state, "./model.pth")
+            elif val_seg_loss <= self.best_seg_loss:
+                print("******** New suboptimal found, saving state ********")
+                state["best_seg_loss"] = self.best_seg_loss = val_seg_loss
+                torch.save(state, "./model_seg.pth")
             elif epoch == self.num_epochs - 1:
                 print("******** Saving last state ********")
                 torch.save(state, "./last_model.pth")
             print()
+
+    @staticmethod
+    def try_to_load(field_to_store, checkpoint, key):
+        try:
+            field_to_store.load_state_dict(checkpoint[key])
+        except:
+            print(f"No '{key}' key in checkpoint!")
+
+    @staticmethod
+    def try_to_assign(checkpoint, key, default_val=None, verbose=True):
+        try:
+            if verbose:
+                print(f"Key '{key}' is {checkpoint[key]}")
+            return checkpoint[key]
+        except:
+            print(f"No '{key}' key in checkpoint!")
+            return default_val
 
 
 def prepare_and_visualize(image, mask):
@@ -175,12 +187,13 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     if os.path.isfile(args.model):
-        model = smp.Unet(args.backend, encoder_weights=None, classes=4, activation=None, )
+        model = smp.FPN(args.backend, encoder_weights=None, classes=4, activation=None,
+                         aux_params={'classes': 4, 'dropout': 0.75})
         ckpt = torch.load(args.model)
         print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
     else:
-        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
-                         aux_params={'classes': 2, 'dropout': 0.5})
+        model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+                        aux_params={'classes': 4, 'dropout': 0.75})
 
     model_trainer = Trainer(model, ckpt)
     # Visualization check
@@ -217,10 +230,10 @@ def parse_arguments(argv):
     #                     default='../datasets/queries')
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
-                        default='./model.pth')
+                        default='./model_seg_candidate.pth')
     parser.add_argument('--backend', type=str,
                         help='Model backend',
-                        default='efficientnet-b5')
+                        default='efficientnet-b0')
     parser.add_argument('--log_dir', type=str,
                         help='Directory where to write event logs.',
                         default='../testing_results')

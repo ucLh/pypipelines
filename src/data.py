@@ -52,12 +52,12 @@ def make_mask(row_id, df):
 
 
 def make_label(mask):
-    if np.count_nonzero(mask):
-        label = torch.ones(1, dtype=torch.long).cpu()
-    else:
-        label = torch.zeros(1, dtype=torch.long).cpu()
-    return label
+    label = np.zeros(4)
+    for i in range(4):
+        if np.count_nonzero(mask[i, :, :]):
+            label[i] = 1
 
+    return torch.from_numpy(label)
 
 
 def make_mask_custom(row_id, df):

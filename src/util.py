@@ -109,7 +109,7 @@ class MetricsLogger:
         logger.addHandler(handler1)
         return logger
 
-    def seg_epoch_log(self, phase, epoch, epoch_loss_list, meter, start, log_dir='../logs'):
+    def epoch_log(self, phase, epoch, epoch_loss_list, meter, start, log_dir='../logs'):
         '''logging the metrics at the end of an epoch'''
         overall_loss, loss_seg, loss_cls = epoch_loss_list
         dices, iou = meter.get_metrics()

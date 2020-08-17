@@ -1,3 +1,5 @@
+from __future__ import annotations
+from abc import ABC, abstractmethod
 import argparse
 import os
 import sys
@@ -15,12 +17,12 @@ from torch.multiprocessing import set_start_method
 # from torchtools.optim import RangerLars
 
 from data import provider, visualize, shuffle_minibatch
-from util import Meter, MetricsLogger, DiceLoss
+from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, model, checkpoint):
+    def __init__(self, model, checkpoint, mode):
         self.num_workers = 6
         self.batch_size = {"train": 16, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
@@ -31,11 +33,12 @@ class Trainer(object):
         self.best_loss = 1e6
         self.best_seg_loss = 1e6
         self.phases = ["train", "val"]
-        self.mode = "seg"
+        self.mode = mode
         self.device = torch.device("cuda:0")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
         self.net = self.net.to(self.device)
+        self.freeze_backbone_if_needed()
         self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr), opt_level="O1")
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
@@ -70,20 +73,29 @@ class Trainer(object):
         self.logger = MetricsLogger()
         self.tensorboard_writer = SummaryWriter("../logs/runs")
 
-    def forward(self, images, target_masks, target_lables, mode):
+    def freeze_backbone_if_needed(self):
+        if self.mode == TrainerModes.cls:
+            set_parameter_requires_grad(self.net.encoder)
+            set_parameter_requires_grad(self.net.decoder)
+            set_parameter_requires_grad(self.net.segmentation_head)
+
+    def forward(self, images, target_masks, target_lables):
         images = images.to(self.device)
         masks = target_masks.to(self.device)
-        if mode == "combine":
-            labels = target_lables.to(self.device)
-            labels.squeeze_()
+        labels = target_lables.to(self.device)
+        labels.squeeze_()
+        if self.mode == TrainerModes.combine:
             masks_pred, labels_pred = self.net(images)
             loss_cls = self.criterion_cls(labels_pred, labels)
             loss_seg = self.criterion(masks_pred, masks)
             loss_dice = DiceLoss.forward(masks_pred, masks)
             loss = (loss_cls, loss_seg, loss_dice)
-        else:
-            masks_pred = self.net(images)
+        elif self.mode == TrainerModes.seg:
+            masks_pred, labels_pred = self.net(images)
             loss = self.criterion(masks_pred, masks)
+        elif self.mode == TrainerModes.cls:
+            masks_pred, labels_pred = self.net(images)
+            loss = self.criterion_cls(labels_pred, labels)
 
         return loss, masks_pred
 
@@ -105,11 +117,11 @@ class Trainer(object):
         self.optimizer.zero_grad()
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
             images, masks, labels = batch
-            if phase == "train":
-                images, masks = shuffle_minibatch(images, masks)
-            losses, outputs = self.forward(images, masks, labels, self.mode)
+            # if phase == "train":
+            #     images, masks = shuffle_minibatch(images, masks)
+            losses, outputs = self.forward(images, masks, labels)
 
-            if self.mode == "combine":
+            if self.mode == TrainerModes.combine:
                 loss_cls, loss_seg, loss_dice = losses
                 loss_cls /= self.accumulation_steps
                 loss_seg /= self.accumulation_steps
@@ -127,22 +139,24 @@ class Trainer(object):
                     self.optimizer.zero_grad()
             running_loss += loss.item()
 
-            if self.mode == "combine":
+            if self.mode == TrainerModes.combine:
                 rn_loss_seg += loss_seg.item()
                 rn_loss_cls += loss_cls.item()
                 rn_loss_dice += loss_dice.item()
-            outputs = outputs.detach().cpu()
-            meter.update(masks, outputs)
+            if self.mode == TrainerModes.seg or self.mode == TrainerModes.combine:
+                outputs = outputs.detach().cpu()
+                meter.update(masks, outputs)
 
         epoch_loss_list = self.postprocess_losses((running_loss, rn_loss_seg, rn_loss_cls, rn_loss_dice), total_batches)
         epoch_loss = epoch_loss_list[0]
         dice, iou = self.logger.epoch_log(self.mode, phase, epoch, epoch_loss_list, meter)
         self.tensorboard_writer.add_scalar('Loss/' + phase, epoch_loss, epoch)
-        self.tensorboard_writer.add_scalar('Dice/' + phase, dice, epoch)
-        self.tensorboard_writer.add_scalar('Iou/' + phase, iou, epoch)
         self.losses[phase].append(epoch_loss)
-        self.dice_scores[phase].append(dice)
-        self.iou_scores[phase].append(iou)
+        if self.mode != TrainerModes.cls:
+            self.tensorboard_writer.add_scalar('Dice/' + phase, dice, epoch)
+            self.tensorboard_writer.add_scalar('Iou/' + phase, iou, epoch)
+            self.dice_scores[phase].append(dice)
+            self.iou_scores[phase].append(iou)
         print('Learning rate: ', self.optimizer.param_groups[0]['lr'])
         torch.cuda.empty_cache()
         return epoch_loss_list, dice
@@ -216,7 +230,12 @@ def main(args):
         model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
                         aux_params={'classes': 4, 'dropout': 0.75})
 
-    model_trainer = Trainer(model, ckpt)
+    for mode in TrainerModes:
+        if mode.value == args.mode:
+            train_mode = mode
+            break
+
+    model_trainer = Trainer(model, ckpt, train_mode)
     # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')
@@ -249,6 +268,9 @@ def parse_arguments(argv):
     # parser.add_argument('--df_root', type=str,
     #                     help='Path to data directory which needs to be forward passed through the network',
     #                     default='../datasets/queries')
+    parser.add_argument('--mode', type=str,
+                        help='Training mode. One of "seg", "cls" or "combine"',
+                        default='seg')
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
                         default='../ckpt/effnetb0_fpn_dice_v2.pth')

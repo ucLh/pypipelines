@@ -64,10 +64,16 @@ def create_transforms(additional):
 
 
 def calculate_dice_and_iou(model, datasets, loaders, mask_df, thresholds, min_area):
-    def tta_mean(preds):
+    def tta_mean(preds, labels=None):
         preds = torch.stack(preds)
         preds = torch.mean(preds, dim=0)
-        return preds.detach().cpu().numpy()
+        if labels is not None:
+            labels = torch.stack(labels)
+            labels = torch.mean(labels, dim=0)
+            labels = labels.detach().cpu().numpy()  # has shape (1, 4)
+            labels = labels[0]
+
+        return preds.detach().cpu().numpy(), labels
 
     def batch_postprocessing():
         for p, file in zip(preds, image_file):
@@ -77,11 +83,13 @@ def calculate_dice_and_iou(model, datasets, loaders, mask_df, thresholds, min_ar
             _, target = make_mask_custom(j, mask_df)
             target = torch.tensor(target[np.newaxis, :])
             for i in range(4):
-                p_channel = p[i]
+                p_channel = np.zeros((256, 1600), dtype=np.uint8)
                 imageid_classid = file + '_' + str(i + 1)
-                p_channel = (p_channel > thresholds[i]).astype(np.uint8)
-                if p_channel.sum() < min_area[i]:
-                    p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
+                if (labels is None) or (labels[i] > 0):
+                    p_channel = p[i]
+                    p_channel = (p_channel > thresholds[i]).astype(np.uint8)
+                    if p_channel.sum() < min_area[i]:
+                        p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
                 # Save channel to obtain all channels for metrics calculation
                 p_img.append(p_channel)
                 res.append({
@@ -106,6 +114,8 @@ def calculate_dice_and_iou(model, datasets, loaders, mask_df, thresholds, min_ar
             for i, batch in enumerate(loaders_batch):
                 features = batch['features'].cuda()
                 output = model(features)
+                if type(output) is tuple:
+                    output, label = output
                 p = torch.sigmoid(output)
                 # inverse operations for TTA
                 p = datasets[i].inverse(p)
@@ -113,7 +123,7 @@ def calculate_dice_and_iou(model, datasets, loaders, mask_df, thresholds, min_ar
                 image_file = batch['image_file']
 
             # TTA mean
-            preds = tta_mean(preds)
+            preds, labels = tta_mean(preds)
 
             # Batch post processing
             batch_postprocessing()
@@ -137,7 +147,7 @@ def main(args):
     unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
     unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
     eff_net_v2 = load('../ckpt/traced_effnetb7_1024_mixup_v2.pth').cuda()
-    eff_net = load('../ckpt/traced_effnetb7_1024_mixup.pth').cuda()
+    eff_net = load('../ckpt/effnetb0_final_stage/traced_effnetb0_averaged.pth').cuda()
 
     models_list = [eff_net_v2, eff_net, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
     models_dict = {}

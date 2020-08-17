@@ -1,9 +1,16 @@
+import enum
 import logging
 logging.basicConfig(level=logging.DEBUG, filemode='w')
 import os
 
 import numpy as np
 import torch
+
+
+class TrainerModes(enum.Enum):
+    seg = "seg"
+    cls = "cls"
+    combine = "combine"
 
 
 class DiceLoss(torch.nn.Module):
@@ -129,9 +136,14 @@ class MetricsLogger:
 
     def epoch_log(self, mode, phase, epoch, epoch_loss_list, meter):
         '''logging the metrics at the end of an epoch'''
-        if mode != "combine":
+        if mode == TrainerModes.combine:
+            return self.combine_epoch_log(phase, epoch, epoch_loss_list, meter)
+        elif mode == TrainerModes.seg:
             return self.seg_epoch_log(phase, epoch, epoch_loss_list, meter)
+        elif mode == TrainerModes.cls:
+            return self.cls_epoch_log(phase, epoch, epoch_loss_list)
 
+    def combine_epoch_log(self, phase, epoch, epoch_loss_list, meter):
         overall_loss, loss_seg, loss_cls, loss_dice = epoch_loss_list
         dices, iou = meter.get_metrics()
         dice, dice_neg, dice_pos = dices
@@ -146,11 +158,13 @@ class MetricsLogger:
                   f"dice_neg: {dice_neg:.4f} | dice_pos: {dice_pos:.4f}")
         return dice, iou
 
-    def cls_epoch_log(self, phase, epoch, epoch_loss):
+    def cls_epoch_log(self, phase, epoch, epoch_loss_list):
+        epoch_loss = epoch_loss_list[0]
         if phase == 'val':
             self.logger.info(f"Epoch: {epoch}| Loss: {epoch_loss:.4f}")
         else:
             print(f"Epoch: {epoch}| Loss: {epoch_loss:.4f}")
+        return None, None
 
     def seg_epoch_log(self, phase, epoch, epoch_loss_list, meter):
         overall_loss = epoch_loss_list[0]

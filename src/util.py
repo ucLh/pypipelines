@@ -6,6 +6,24 @@ import numpy as np
 import torch
 
 
+class DiceLoss(torch.nn.Module):
+    def __init__(self, weight=None, size_average=True):
+        super(DiceLoss, self).__init__()
+
+    def forward(inputs, targets, smooth=1):
+        # comment out if your model contains a sigmoid or equivalent activation layer
+        inputs = torch.nn.functional.sigmoid(inputs)
+
+        # flatten label and prediction tensors
+        inputs = inputs.view(-1)
+        targets = targets.view(-1)
+
+        intersection = (inputs * targets).sum()
+        dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
+
+        return 1 - dice
+
+
 def predict(X, threshold):
     '''X is sigmoid output of the model'''
     X_p = np.copy(X)
@@ -109,19 +127,22 @@ class MetricsLogger:
         logger.addHandler(handler1)
         return logger
 
-    def epoch_log(self, phase, epoch, epoch_loss_list, meter, start, log_dir='../logs'):
+    def epoch_log(self, mode, phase, epoch, epoch_loss_list, meter):
         '''logging the metrics at the end of an epoch'''
-        overall_loss, loss_seg, loss_cls = epoch_loss_list
+        if mode != "combine":
+            return self.seg_epoch_log(phase, epoch, epoch_loss_list, meter)
+
+        overall_loss, loss_seg, loss_cls, loss_dice = epoch_loss_list
         dices, iou = meter.get_metrics()
         dice, dice_neg, dice_pos = dices
         if phase == 'val':
             self.logger.info(f"Epoch: {epoch}| Loss: {overall_loss:.4f} | SegLoss: {loss_seg:.4f} | "
-                             f"ClsLoss: {loss_cls:.4f} | IoU: {iou:.4f} | "
+                             f"ClsLoss: {loss_cls:.4f} | DiceLoss: {loss_dice:.4f} | IoU: {iou:.4f} | "
                              f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
                              f"dice_pos: {dice_pos:.4f}")
         else:
             print(f"Epoch: {epoch}| Loss: {overall_loss:.4f} | SegLoss: {loss_seg:.4f} | "
-                  f"ClsLoss: {loss_cls:.4f} | IoU: {iou:.4f} | dice: {dice:.4f} | "
+                  f"ClsLoss: {loss_cls:.4f} | DiceLoss: {loss_dice:.4f} | IoU: {iou:.4f} | dice: {dice:.4f} | "
                   f"dice_neg: {dice_neg:.4f} | dice_pos: {dice_pos:.4f}")
         return dice, iou
 
@@ -130,6 +151,20 @@ class MetricsLogger:
             self.logger.info(f"Epoch: {epoch}| Loss: {epoch_loss:.4f}")
         else:
             print(f"Epoch: {epoch}| Loss: {epoch_loss:.4f}")
+
+    def seg_epoch_log(self, phase, epoch, epoch_loss_list, meter):
+        overall_loss = epoch_loss_list[0]
+        dices, iou = meter.get_metrics()
+        dice, dice_neg, dice_pos = dices
+        if phase == 'val':
+            self.logger.info(f"Epoch: {epoch}| Loss: {overall_loss:.4f} | IoU: {iou:.4f} | "
+                             f"dice: {dice:.4f} | dice_neg: {dice_neg:.4f} | "
+                             f"dice_pos: {dice_pos:.4f}")
+        else:
+            print(f"Epoch: {epoch}| Loss: {overall_loss:.4f} | "
+                  f"IoU: {iou:.4f} | dice: {dice:.4f} | "
+                  f"dice_neg: {dice_neg:.4f} | dice_pos: {dice_pos:.4f}")
+        return dice, iou
 
 
 def compute_ious(pred, label, classes, ignore_index=255, only_present=True):

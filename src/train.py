@@ -15,7 +15,7 @@ from torch.multiprocessing import set_start_method
 # from torchtools.optim import RangerLars
 
 from data import provider, visualize, shuffle_minibatch
-from util import Meter, MetricsLogger
+from util import Meter, MetricsLogger, DiceLoss
 
 
 class Trainer(object):
@@ -25,12 +25,13 @@ class Trainer(object):
         self.batch_size = {"train": 16, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
         self.lr = 1e-6
-        self.num_epochs = 80
+        self.num_epochs = 160
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
         self.best_seg_loss = 1e6
         self.phases = ["train", "val"]
+        self.mode = "seg"
         self.device = torch.device("cuda:0")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
@@ -45,7 +46,7 @@ class Trainer(object):
             amp.load_state_dict(checkpoint["amp"])
             self.start_epoch = checkpoint["epoch"]
             self.best_dice = checkpoint["best_dice"]
-            self.best_loss = self.try_to_assign(checkpoint, "best_loss", self.best_loss)
+            # self.best_loss = self.try_to_assign(checkpoint, "best_loss", self.best_loss)
             self.best_seg_loss = self.try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
@@ -53,8 +54,8 @@ class Trainer(object):
         cudnn.benchmark = False
         self.dataloaders = {
             phase: provider(
-                data_folder='../data/Severstal/train_images/',
-                df_path='../data/Severstal/train.csv',
+                data_folder='../data/Severstal/train_test_images/',
+                df_path='../data/Severstal/train_test.csv',
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),
@@ -69,15 +70,22 @@ class Trainer(object):
         self.logger = MetricsLogger()
         self.tensorboard_writer = SummaryWriter("../logs/runs")
 
-    def forward(self, images, target_masks, target_lables):
+    def forward(self, images, target_masks, target_lables, mode):
         images = images.to(self.device)
         masks = target_masks.to(self.device)
-        labels = target_lables.to(self.device)
-        labels.squeeze_()
-        masks_pred, labels_pred = self.net(images)
-        loss_a = self.criterion(masks_pred, masks)
-        loss_b = self.criterion_cls(labels_pred, labels)
-        return loss_a, loss_b, masks_pred
+        if mode == "combine":
+            labels = target_lables.to(self.device)
+            labels.squeeze_()
+            masks_pred, labels_pred = self.net(images)
+            loss_cls = self.criterion_cls(labels_pred, labels)
+            loss_seg = self.criterion(masks_pred, masks)
+            loss_dice = DiceLoss.forward(masks_pred, masks)
+            loss = (loss_cls, loss_seg, loss_dice)
+        else:
+            masks_pred = self.net(images)
+            loss = self.criterion(masks_pred, masks)
+
+        return loss, masks_pred
 
     def postprocess_losses(self, losses, total_batches):
         res = []
@@ -89,20 +97,28 @@ class Trainer(object):
     def iterate(self, epoch, phase):
         meter = Meter(phase, epoch)
         start = time.strftime("%H:%M:%S")
-        print(f"Starting epoch: {epoch} | phase: {phase} | ⏰: {start}")
+        print(f"Starting epoch: {epoch} | phase: {phase} | : {start}")
         self.net.train(phase == "train")
         dataloader = self.dataloaders[phase]
-        running_loss, rn_loss_seg, rn_loss_cls = 0.0, 0.0, 0.0
+        running_loss, rn_loss_seg, rn_loss_cls, rn_loss_dice = 0.0, 0.0, 0.0, 0.0
         total_batches = len(dataloader)
         self.optimizer.zero_grad()
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
             images, masks, labels = batch
-            # if phase == "train":
-            #     images, masks = shuffle_minibatch(images, masks)
-            loss_seg, loss_cls, outputs = self.forward(images, masks, labels)
-            loss_cls /= self.accumulation_steps
-            loss_seg /= self.accumulation_steps
-            loss = loss_seg + loss_cls
+            if phase == "train":
+                images, masks = shuffle_minibatch(images, masks)
+            losses, outputs = self.forward(images, masks, labels, self.mode)
+
+            if self.mode == "combine":
+                loss_cls, loss_seg, loss_dice = losses
+                loss_cls /= self.accumulation_steps
+                loss_seg /= self.accumulation_steps
+                loss_dice /= self.accumulation_steps
+                loss = loss_seg + loss_cls + 0.2 * loss_dice
+            else:
+                loss = losses
+                loss /= self.accumulation_steps
+
             if phase == "train":
                 with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                     scaled_loss.backward()
@@ -110,14 +126,17 @@ class Trainer(object):
                     self.optimizer.step()
                     self.optimizer.zero_grad()
             running_loss += loss.item()
-            rn_loss_seg += loss_seg.item()
-            rn_loss_cls += loss_cls.item()
+
+            if self.mode == "combine":
+                rn_loss_seg += loss_seg.item()
+                rn_loss_cls += loss_cls.item()
+                rn_loss_dice += loss_dice.item()
             outputs = outputs.detach().cpu()
             meter.update(masks, outputs)
 
-        epoch_loss_list = self.postprocess_losses((running_loss, rn_loss_seg, rn_loss_cls), total_batches)
+        epoch_loss_list = self.postprocess_losses((running_loss, rn_loss_seg, rn_loss_cls, rn_loss_dice), total_batches)
         epoch_loss = epoch_loss_list[0]
-        dice, iou = self.logger.epoch_log(phase, epoch, epoch_loss_list, meter, start)
+        dice, iou = self.logger.epoch_log(self.mode, phase, epoch, epoch_loss_list, meter)
         self.tensorboard_writer.add_scalar('Loss/' + phase, epoch_loss, epoch)
         self.tensorboard_writer.add_scalar('Dice/' + phase, dice, epoch)
         self.tensorboard_writer.add_scalar('Iou/' + phase, iou, epoch)
@@ -126,7 +145,7 @@ class Trainer(object):
         self.iou_scores[phase].append(iou)
         print('Learning rate: ', self.optimizer.param_groups[0]['lr'])
         torch.cuda.empty_cache()
-        return epoch_loss, epoch_loss_list[1], dice
+        return epoch_loss_list, dice
 
     def start(self):
         # self.tensorboard_writer.add_graph(self.net, self.dataloaders["train"].dataset[0])
@@ -143,17 +162,19 @@ class Trainer(object):
                 "scheduler": self.scheduler.state_dict(),
             }
             with torch.no_grad():
-                val_loss, val_seg_loss, val_dice = self.iterate(epoch, "val")
+                losses, val_dice = self.iterate(epoch, "val")
+                val_loss = losses[0]
                 self.scheduler.step(val_loss)
             if val_loss <= self.best_loss:
                 print("******** New optimal found, saving state ********")
                 state["best_loss"] = self.best_loss = val_loss
                 torch.save(state, "./model.pth")
-            elif val_seg_loss <= self.best_seg_loss:
-                print("******** New suboptimal found, saving state ********")
-                state["best_seg_loss"] = self.best_seg_loss = val_seg_loss
-                torch.save(state, "./model_seg.pth")
-            elif epoch == self.num_epochs - 1:
+            elif self.mode == "combine":
+                if losses[1] <= self.best_seg_loss:
+                    print("******** New suboptimal found, saving state ********")
+                    state["best_seg_loss"] = self.best_seg_loss = losses[1]
+                    torch.save(state, "./model_seg.pth")
+            if epoch == self.num_epochs - 1:
                 print("******** Saving last state ********")
                 torch.save(state, "./last_model.pth")
             print()
@@ -230,7 +251,7 @@ def parse_arguments(argv):
     #                     default='../datasets/queries')
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
-                        default='./model_seg_candidate.pth')
+                        default='../ckpt/effnetb0_fpn_dice_v2.pth')
     parser.add_argument('--backend', type=str,
                         help='Model backend',
                         default='efficientnet-b0')

@@ -22,18 +22,19 @@ from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_req
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, model, checkpoint, mode):
+    def __init__(self, model, checkpoint, mode, backend):
         self.num_workers = 6
-        self.batch_size = {"train": 16, "val": 4}
+        self.batch_size = {"train": 4, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
         self.lr = 1e-6
-        self.num_epochs = 160
+        self.num_epochs = 240
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
         self.best_seg_loss = 1e6
         self.phases = ["train", "val"]
         self.mode = mode
+        self.backend = backend
         self.device = torch.device("cuda:0")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
@@ -43,14 +44,7 @@ class Trainer(object):
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
         if checkpoint is not None:
-            self.net.load_state_dict(checkpoint["state_dict"])
-            # self.optimizer.load_state_dict(checkpoint["optimizer"])
-            # self.try_to_load(self.scheduler, checkpoint, "scheduler")
-            amp.load_state_dict(checkpoint["amp"])
-            self.start_epoch = checkpoint["epoch"]
-            self.best_dice = checkpoint["best_dice"]
-            # self.best_loss = self.try_to_assign(checkpoint, "best_loss", self.best_loss)
-            self.best_seg_loss = self.try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
+            self.load_checkpoint(checkpoint)
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
@@ -72,6 +66,45 @@ class Trainer(object):
         self.dice_scores = {phase: [] for phase in self.phases}
         self.logger = MetricsLogger()
         self.tensorboard_writer = SummaryWriter("../logs/runs")
+
+    def load_checkpoint(self, checkpoint):
+
+        def try_to_load(field_to_store, checkpoint, key):
+            try:
+                field_to_store.load_state_dict(checkpoint[key])
+            except:
+                print(f"No '{key}' key in checkpoint!")
+
+        def try_to_assign(checkpoint, key, default_val=None, verbose=True):
+            try:
+                if verbose:
+                    print(f"Key '{key}' is {checkpoint[key]}")
+                return checkpoint[key]
+            except:
+                print(f"No '{key}' key in checkpoint!")
+                return default_val
+
+        def load_model_state_dict(net, checkpoint, backend, key="state_dict"):
+            # Check if there is a classification head
+            try:
+                net.load_state_dict(checkpoint[key])
+            except Exception as e:
+                print("Trying to load model without classifier")
+                temp_model = smp.Unet(backend, encoder_weights='imagenet', classes=4, activation=None)
+                temp_model.load_state_dict(checkpoint[key])
+                net.encoder = temp_model.encoder
+                net.decoder = temp_model.decoder
+                net.segmentation_head = temp_model.segmentation_head
+                print("Successfully loaded model without classifier")
+
+        load_model_state_dict(self.net, checkpoint, self.backend)
+        # self.optimizer.load_state_dict(checkpoint["optimizer"])
+        # try_to_load(self.scheduler, checkpoint, "scheduler")
+        amp.load_state_dict(checkpoint["amp"])
+        self.start_epoch = checkpoint["epoch"]
+        self.best_dice = checkpoint["best_dice"]
+        # self.best_loss = self._try_to_assign(checkpoint, "best_loss", self.best_loss)
+        self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
 
     def freeze_backbone_if_needed(self):
         if self.mode == TrainerModes.cls:
@@ -193,24 +226,6 @@ class Trainer(object):
                 torch.save(state, "./last_model.pth")
             print()
 
-    @staticmethod
-    def try_to_load(field_to_store, checkpoint, key):
-        try:
-            field_to_store.load_state_dict(checkpoint[key])
-        except:
-            print(f"No '{key}' key in checkpoint!")
-
-    @staticmethod
-    def try_to_assign(checkpoint, key, default_val=None, verbose=True):
-        try:
-            if verbose:
-                print(f"Key '{key}' is {checkpoint[key]}")
-            return checkpoint[key]
-        except:
-            print(f"No '{key}' key in checkpoint!")
-            return default_val
-
-
 def prepare_and_visualize(image, mask):
     image = np.transpose(image, [1, 2, 0])
     mask = np.transpose(mask, [1, 2, 0])
@@ -222,12 +237,12 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     if os.path.isfile(args.model):
-        model = smp.FPN(args.backend, encoder_weights=None, classes=4, activation=None,
+        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
                          aux_params={'classes': 4, 'dropout': 0.75})
         ckpt = torch.load(args.model)
         print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
     else:
-        model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
                         aux_params={'classes': 4, 'dropout': 0.75})
 
     for mode in TrainerModes:
@@ -235,7 +250,7 @@ def main(args):
             train_mode = mode
             break
 
-    model_trainer = Trainer(model, ckpt, train_mode)
+    model_trainer = Trainer(model, ckpt, train_mode, args.backend)
     # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')
@@ -270,13 +285,14 @@ def parse_arguments(argv):
     #                     default='../datasets/queries')
     parser.add_argument('--mode', type=str,
                         help='Training mode. One of "seg", "cls" or "combine"',
-                        default='seg')
+                        default='combine')
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
-                        default='../ckpt/effnetb0_fpn_dice_v2.pth')
+                        # default='../ckpt/effnetb7_1024_mixup_v2.pth')
+                        default='model.pth')
     parser.add_argument('--backend', type=str,
                         help='Model backend',
-                        default='efficientnet-b0')
+                        default='efficientnet-b7')
     parser.add_argument('--log_dir', type=str,
                         help='Directory where to write event logs.',
                         default='../testing_results')

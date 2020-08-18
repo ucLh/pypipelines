@@ -7,19 +7,18 @@ from pytorch_seg_models import Unet as Unet2
 
 
 def main(args):
-    # model = smp.Unet("efficientnet-b7", encoder_weights=None, classes=4, activation=None,
-    #                  aux_params={'classes': 2, 'dropout': 0.5})
+    model = smp.Unet("efficientnet-b7", encoder_weights=None, classes=4, activation=None)
     # model = Unet2("se_resnext50_32x4d", encoder_weights=None, classes=4, activation='softmax')
-    model = smp.FPN("efficientnet-b0", encoder_weights=None, classes=4, activation=None,
-                    aux_params={'classes': 4, 'dropout': 0.75})
+    # model = smp.FPN("efficientnet-b0", encoder_weights=None, classes=4, activation=None,
+    #                 aux_params={'classes': 4, 'dropout': 0.75})
     model.eval()
     model.encoder.set_swish(memory_efficient=False)
-    ckpt = torch.load(f"../ckpt/effnetb0_final_stage/{args.model_name}")
+    ckpt = torch.load(f"../ckpt/effnetb7_mixup_retrain_on_extended_set/{args.model_name}")
     print(f"Best loss: {ckpt['best_loss']}, epoch: {ckpt['epoch']}")
     model.load_state_dict(ckpt["state_dict"])
     sample = torch.ones([1, 3, 64, 64]).to("cuda:0")
     traced = torch.jit.trace(model, torch.rand((1, 3, 256, 1600)))
-    traced.save(f"../ckpt/effnetb0_final_stage/traced_{args.model_name}")
+    traced.save(f"../ckpt/effnetb7_mixup_retrain_on_extended_set/traced_{args.model_name}")
     print("saved")
 
 

@@ -10,9 +10,9 @@ from models import Encoder, Decoder
 from models import ClassifierNew
 
 
-def trace_and_save_model(model, sample, dir_path):
+def trace_and_save_model(model, sample, dir_path, name):
     traced = torch.jit.trace(model, sample)
-    model1_path = os.path.join(dir_path, 'encoder.pth')
+    model1_path = os.path.join(dir_path, name)
     traced.save(model1_path)
 
 
@@ -43,12 +43,12 @@ def main(args):
 
     encoder.eval()
     encoder.encoder.set_swish(memory_efficient=False)
-    trace_and_save_model(encoder, torch.rand((1, 3, 256, 1600)), dir_path)
+    trace_and_save_model(encoder, torch.rand((1, 3, 256, 1600)), dir_path, 'encoder.pth')
     print('Encoder saved!')
 
     decoder_sample = model_seg.encoder(torch.rand((1, 3, 256, 1600)))
     decoder.eval()
-    trace_and_save_model(decoder, decoder_sample, dir_path)
+    trace_and_save_model(decoder, decoder_sample, dir_path, 'decoder.pth')
     print('Decoder saved!')
 
 
@@ -57,7 +57,7 @@ def parse_arguments(argv):
 
     parser.add_argument('--classifier', type=str,
                         help='Path to (.pth) file with classifier weights',
-                        default='../ckpt/cls_v3.pth')
+                        default='../ckpt/cls.pth')
     parser.add_argument('--segmentation_net', type=str,
                         help='Path to (.pth) file with segmentation net weights',
                         default='../ckpt/effnetb7_1024_mixup_v2.pth')

@@ -1,0 +1,4 @@
+*pycache*
+# Editors
+.vscode/
+.idea/

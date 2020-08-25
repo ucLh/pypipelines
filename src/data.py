@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
-                            RandomBrightnessContrast, Resize, ImageOnlyTransform, CoarseDropout)
+                            RandomBrightnessContrast, Resize, MaskDropout)
 from albumentations.pytorch import ToTensor
 
 
@@ -110,17 +110,33 @@ class SteelDataset(Dataset):
         img_tensor = img_tensor[0, :, :]
         return img_tensor[np.newaxis, ...]
 
+    @staticmethod
+    def _mask_dropout(img, mask):
+        masks = []
+        md_transform = Compose([MaskDropout(max_objects=1, p=0.5), ToTensor()])
+        to_tensor = ToTensor()
+        for i in range(4):
+            img = img.numpy()
+            img = np.transpose(img, [1, 2, 0])
+            augmented = md_transform(image=img, mask=mask[i].numpy())
+            img, mask_aug = augmented['image'], augmented['mask']
+            masks.append(mask_aug[0])
+        masks = torch.stack(masks)
+        return img, masks
+
 
 class SteelClassify(SteelDataset):
     def __getitem__(self, idx):
         image_id, mask = make_mask(idx, self.df)
         image_path = os.path.join(self.root, image_id)
-        img = cv2.imread(image_path)
-        augmented = self.transforms(image=img, mask=mask)
+        img_raw = cv2.imread(image_path)
+        augmented = self.transforms(image=img_raw, mask=mask)
         img = augmented['image']
         # img = self._tensor_to_grayscale(img)
         mask = augmented['mask']  # 1x256x1600x4
         mask = mask[0].permute(2, 0, 1)  # 4x256x1600
+
+        img, mask = self._mask_dropout(img, mask)
         label = make_label(mask)
 
         return img, mask, label
@@ -136,7 +152,6 @@ def get_transforms(phase, mean, std):
                 HorizontalFlip(p=0.5),
                 VerticalFlip(p=0.5),
                 RandomBrightnessContrast(p=0.5),
-                # CoarseDropout(max_height=64, max_width=64, min_height=16, min_width=16, min_holes=3, p=0.5)
             ]
         )
     list_transforms.extend(
@@ -279,5 +294,55 @@ def shuffle_minibatch_onehot(inputs, targets, mixup=True):
     inputs_shuffle = inputs1 + inputs2
     targets_shuffle = targets1_oh + targets2_oh
 
-    return inputs_shuffle, targets_shuffle
+def shuffle_minibatch_combined(inputs, targets, masks, mixup=True):
+    """Shuffle a minibatch and do linear interpolation between images and labels.
+        Args:
+            inputs: a numpy array of images with size batch_size x H x W x 3.
+            targets: a numpy array of labels with size batch_size x 1.
+            mixup: a boolen as whether to do mixup or not. If mixup is True, we
+                sample the weight from beta distribution using parameter alpha=1,
+                beta=1. If mixup is False, we set the weight to be 1 and 0
+                respectively for the randomly shuffled mini-batches.
+        """
+    batch_size = inputs.shape[0]
+    rp1 = torch.randperm(batch_size)
+    inputs1 = inputs[rp1]
+    targets1 = targets[rp1]
+    targets1_1 = targets1.unsqueeze(1)
+    masks1 = masks[rp1]
 
+    rp2 = torch.randperm(batch_size)
+    inputs2 = inputs[rp2]
+    targets2 = targets[rp2]
+    masks2 = masks[rp2]
+
+    y_onehot = torch.FloatTensor(batch_size, 4)
+    y_onehot.zero_()
+    targets1_oh = y_onehot.scatter_(1, targets1.long(), 1)
+
+    y_onehot2 = torch.FloatTensor(batch_size, 4)
+    y_onehot2.zero_()
+    targets2_oh = y_onehot2.scatter_(1, targets2.long(), 1)
+
+    if mixup is True:
+        a = np.random.beta(1, 1, [batch_size, 1])
+    else:
+        a = np.ones((batch_size, 1))
+
+    b = np.tile(a[..., None, None], [1, 3, 256, 512])
+
+    inputs1 = inputs1 * torch.from_numpy(b).float()
+    inputs2 = inputs2 * torch.from_numpy(1 - b).float()
+
+    masks1 = masks1 * torch.from_numpy(b).float()
+    masks2 = masks2 * torch.from_numpy(1 - b).float()
+
+    c = np.tile(a, [1, 4])
+    targets1_oh = targets1_oh.float() * torch.from_numpy(c).float()
+    targets2_oh = targets2_oh.float() * torch.from_numpy(1 - c).float()
+
+    inputs_shuffle = inputs1 + inputs2
+    targets_shuffle = targets1_oh + targets2_oh
+    masks_shuffle = masks1 + masks2
+
+    return inputs_shuffle, targets_shuffle, masks_shuffle

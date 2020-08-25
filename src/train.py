@@ -16,25 +16,26 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.multiprocessing import set_start_method
 # from torchtools.optim import RangerLars
 
+from arguments import parse_arguments_train
 from data import provider, visualize, shuffle_minibatch
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
-    def __init__(self, model, checkpoint, mode, backend):
+    def __init__(self, model, checkpoint, mode, args):
         self.num_workers = 6
         self.batch_size = {"train": 4, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
         self.lr = 1e-6
-        self.num_epochs = 240
+        self.num_epochs = 190
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
         self.best_seg_loss = 1e6
         self.phases = ["train", "val"]
         self.mode = mode
-        self.backend = backend
+        self.args = args
         self.device = torch.device("cuda:0")
         torch.set_default_tensor_type("torch.cuda.FloatTensor")
         self.net = model
@@ -51,8 +52,8 @@ class Trainer(object):
         cudnn.benchmark = False
         self.dataloaders = {
             phase: provider(
-                data_folder='../data/Severstal/train_test_images/',
-                df_path='../data/Severstal/train_test.csv',
+                data_folder=self.args.data_root,
+                df_path=self.args.df_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),
@@ -97,14 +98,14 @@ class Trainer(object):
                 net.segmentation_head = temp_model.segmentation_head
                 print("Successfully loaded model without classifier")
 
-        load_model_state_dict(self.net, checkpoint, self.backend)
-        # self.optimizer.load_state_dict(checkpoint["optimizer"])
-        # try_to_load(self.scheduler, checkpoint, "scheduler")
+        load_model_state_dict(self.net, checkpoint, self.args.backend)
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        try_to_load(self.scheduler, checkpoint, "scheduler")
         amp.load_state_dict(checkpoint["amp"])
         self.start_epoch = checkpoint["epoch"]
         self.best_dice = checkpoint["best_dice"]
-        # self.best_loss = self._try_to_assign(checkpoint, "best_loss", self.best_loss)
-        self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
+        # self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
+        # self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
 
     def freeze_backbone_if_needed(self):
         if self.mode == TrainerModes.cls:
@@ -150,8 +151,8 @@ class Trainer(object):
         self.optimizer.zero_grad()
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
             images, masks, labels = batch
-            # if phase == "train":
-            #     images, masks = shuffle_minibatch(images, masks)
+            if phase == "train" and self.args.use_mixup:
+                images, masks = shuffle_minibatch(images, masks)
             losses, outputs = self.forward(images, masks, labels)
 
             if self.mode == TrainerModes.combine:
@@ -215,7 +216,7 @@ class Trainer(object):
             if val_loss <= self.best_loss:
                 print("******** New optimal found, saving state ********")
                 state["best_loss"] = self.best_loss = val_loss
-                torch.save(state, "./model.pth")
+                torch.save(state, self.args.model_name)
             elif self.mode == "combine":
                 if losses[1] <= self.best_seg_loss:
                     print("******** New suboptimal found, saving state ********")
@@ -237,20 +238,21 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     if os.path.isfile(args.model):
-        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+        model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
                          aux_params={'classes': 4, 'dropout': 0.75})
         ckpt = torch.load(args.model)
         print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
     else:
-        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
-                        aux_params={'classes': 4, 'dropout': 0.75})
+        model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+                         aux_params={'classes': 4, 'dropout': 0.75})
 
     for mode in TrainerModes:
         if mode.value == args.mode:
             train_mode = mode
             break
 
-    model_trainer = Trainer(model, ckpt, train_mode, args.backend)
+    model_trainer = Trainer(model, ckpt, train_mode, args)
+    model_trainer.start()
     # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')
@@ -270,35 +272,8 @@ def main(args):
     # image, mask = shuffle_minibatch(image_raw, mask_raw)
     # image, mask = image[1], mask[1]
     # prepare_and_visualize(image, mask)
-    # exit(1)
-
-    model_trainer.start()
-
-def parse_arguments(argv):
-    parser = argparse.ArgumentParser()
-
-    # parser.add_argument('--data_root', type=str,
-    #                     help='Path to data directory which needs to be forward passed through the network',
-    #                     default='../datasets/queries')
-    # parser.add_argument('--df_root', type=str,
-    #                     help='Path to data directory which needs to be forward passed through the network',
-    #                     default='../datasets/queries')
-    parser.add_argument('--mode', type=str,
-                        help='Training mode. One of "seg", "cls" or "combine"',
-                        default='combine')
-    parser.add_argument('--model', type=str,
-                        help='Path to (.pth) file',
-                        # default='../ckpt/effnetb7_1024_mixup_v2.pth')
-                        default='model.pth')
-    parser.add_argument('--backend', type=str,
-                        help='Model backend',
-                        default='efficientnet-b7')
-    parser.add_argument('--log_dir', type=str,
-                        help='Directory where to write event logs.',
-                        default='../testing_results')
-    return parser.parse_args(argv)
 
 
 if __name__ == '__main__':
     set_start_method('spawn')
-    main(parse_arguments(sys.argv[1:]))
+    main(parse_arguments_train(sys.argv[1:]))

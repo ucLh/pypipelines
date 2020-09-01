@@ -114,7 +114,6 @@ class SteelDataset(Dataset):
     def _mask_dropout(img, mask):
         masks = []
         md_transform = Compose([MaskDropout(max_objects=1, p=0.5), ToTensor()])
-        to_tensor = ToTensor()
         for i in range(4):
             img = img.numpy()
             img = np.transpose(img, [1, 2, 0])
@@ -136,7 +135,7 @@ class SteelClassify(SteelDataset):
         mask = augmented['mask']  # 1x256x1600x4
         mask = mask[0].permute(2, 0, 1)  # 4x256x1600
 
-        img, mask = self._mask_dropout(img, mask)
+        # img, mask = self._mask_dropout(img, mask)
         label = make_label(mask)
 
         return img, mask, label

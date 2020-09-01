@@ -5,7 +5,6 @@ import enum
 import os
 import sys
 
-
 import numpy as np
 import cv2
 import albumentations as A
@@ -43,10 +42,11 @@ class Model:
 
 
 class ModelNames(enum.Enum):
-    eff_net_v2 = 'effnetb7_mixup_v2'
     se_resnext50 = 'unet_se_resnext50'
     resnet34 = 'unet_resnet34'
     mobilenet2 = 'unet_mobilenet2'
+    effnetb7 = 'effnetb7'
+    effnetb0 = 'effnetb0'
 
 
 def create_transforms(additional):
@@ -106,10 +106,12 @@ class ModelInferenceHandler:
             p_img = np.array(p_img)
             # Make it seem like a batch of 1
             p_img = torch.tensor(p_img[np.newaxis, :])
+            self._update_metrics(p_img, target)
 
-            self.dice_score_list_ch.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
-            self.dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
-            self.iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
+    def _update_metrics(self, p_img, target):
+        self.dice_score_list_ch.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
+        self.dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
+        self.iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
 
     def _infer_net(self, datasets, loaders, model, total):
         with torch.no_grad():
@@ -129,8 +131,8 @@ class ModelInferenceHandler:
 
                 # TTA mean
                 preds = self._tta_mean(preds)
-                if labels is not None   :
-                    labels = self._tta_mean(labels)
+                if labels is not None:
+                    # labels = self._tta_mean(labels)
                     labels = labels[0]
 
                 # Batch post processing
@@ -146,85 +148,75 @@ class ModelInferenceHandler:
         return dice, dice_ch, iou, self.res
 
 
+def write_prediction(res, imageid_classid, p_channel):
+    res.append({'ImageId_ClassId': imageid_classid,
+                'EncodedPixels': mask2rle(p_channel)})
+
+
+def make_zeroed_prediction(res, file):
+    p_img = []
+    for i in range(4):
+        imageid_classid = file + '_' + str(i + 1)
+        p_channel = np.zeros((256, 1600), dtype=np.uint8)
+        p_img.append(p_channel)
+        write_prediction(res, imageid_classid, p_channel)
+    p_img = np.array(p_img)
+    # Make it seem like a batch of 1
+    p_img = torch.tensor(p_img[np.newaxis, :])
+    return p_img
+
+
 def calculate_dice_and_iou_ensemble(model, cls, datasets, loaders, mask_df, thresholds, min_area):
-    def write_prediction(res, imageid_classid, p_channel):
-        res.append({'ImageId_ClassId': imageid_classid,
-                    'EncodedPixels': mask2rle(p_channel)})
+    res, dice_score_list, dice_score_list_ch, iou_score_list = [], [], [], []
+    total = len(datasets[0]) // 1
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm(zip(*loaders), total=total)):
+            batch = batch[0]
+            features = batch['features'].cuda()
+            pred_aux, label = cls(features)
+            label = label[0].cpu().numpy()
+            file = os.path.basename(batch['image_file'][0])
 
-    def make_zeroed_prediction(res, file):
-        for i in range(4):
-            imageid_classid = file + '_' + str(i + 1)
-            p_channel = np.zeros((256, 1600), dtype=np.uint8)
-            write_prediction(res, imageid_classid, p_channel)
-
-    def make_predicition(labels, file, p, p_aux, p_img):
-        for i in range(4):
-            p_channel = np.zeros((256, 1600), dtype=np.uint8)
-            imageid_classid = file + '_' + str(i + 1)
-            if labels[i] > 0:
-                p_channel = p[i]
-                p_channel = (p_channel > thresholds[i]).astype(np.uint8)
-                if p_channel.sum() < min_area[i]:
-                    p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
-                else:
-                    p_channel = (p[i] + p_aux[i]) / 2  # Take mean
-                    p_channel = (p_channel > thresholds[i]).astype(np.uint8)
-                    if p_channel.sum() < min_area[i]:
-                        p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
-            p_img.append(p_channel)
-            res.append({
-                'ImageId_ClassId': imageid_classid,
-                'EncodedPixels': mask2rle(p_channel)
-            })
-
-    def batch_processing(image_file, j, labels, preds, preds_aux):
-        for p, p_aux, file in zip(preds, preds_aux, image_file):
-            file = os.path.basename(file)
-            p_img = []
-            _, target = make_mask_custom(j, mask_df)
+            _, target = make_mask_custom(i, mask_df)
             target = torch.tensor(target[np.newaxis, :])
-            make_predicition(labels, file, p, p_aux, p_img)
 
-            p_img = np.array(p_img)
+            if not label[label > 0]:  # Check for any defect
+                p_img = make_zeroed_prediction(res, file)
+                dice_score_list_ch.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
+                dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
+                iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
+                continue
+
+            pred_raw, _ = model(features)  # Only now we feed data to big network
+            p = torch.sigmoid(pred_raw[0]).cpu().numpy()
+            p_aux = torch.sigmoid(pred_aux[0]).cpu().numpy()
+
+            # Image postprocessing
+            p_img = []
+            for j in range(4):
+                p_channel = np.zeros((256, 1600), dtype=np.uint8)
+                imageid_classid = file + '_' + str(j + 1)
+
+                if label[j] > 0:  # Now we are checking for speciefic defects
+                    p_channel = p[j]
+                    p_channel = (p_channel > thresholds[j]).astype(np.uint8)
+                    if p_channel.sum() < min_area[j]:
+                        p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
+                    else:  # We use effnetb0 mask only if effnetb7 finds defect. We are basically refining effnetb7
+                        p_channel = (p[j] + p_aux[j]) / 2  # Take mean
+                        p_channel = (p_channel > thresholds[j]).astype(np.uint8)
+                        if p_channel.sum() < min_area[j]:
+                            p_channel = np.zeros(p_channel.shape, dtype=p_channel.dtype)
+
+                p_img.append(p_channel)
+                write_prediction(res, imageid_classid, p_channel)
+            p_img = np.array(p_img, dtype=np.uint8)
             # Make it seem like a batch of 1
             p_img = torch.tensor(p_img[np.newaxis, :])
 
             dice_score_list_ch.append(dice_single_channel(p_img[0, 2], target[0, 2], 0.5).numpy())
             dice_score_list.append(dice_channel_torch(p_img, target, 0.5).numpy())
             iou_score_list.append(compute_iou_batch(p_img, target, classes=[1]))
-
-    def infer_net(datasets, loaders, model, total):
-        with torch.no_grad():
-            for j, loaders_batch in enumerate(tqdm(zip(*loaders), total=total)):
-                preds, preds_aux, labels = [], [], []
-                image_file = []
-                for i, batch in enumerate(loaders_batch):
-                    features = batch['features'].cuda()
-                    pred_aux, label = cls(features)
-                    pred_raw, _ = model(features)
-                    labels.append(label)
-                    p = torch.sigmoid(pred_raw)
-                    p_aux = torch.sigmoid(pred_aux)
-                    image_file = batch['image_file']
-
-                    # inverse operations for TTA
-                    p = datasets[i].inverse(p)
-                    p_aux = datasets[i].inverse(p_aux)
-                    preds.append(p)
-                    preds_aux.append(p_aux)
-
-                # TTA mean
-                preds = ModelInferenceHandler._tta_mean(preds)
-                preds_aux = ModelInferenceHandler._tta_mean(preds_aux)
-                labels = ModelInferenceHandler._tta_mean(labels)
-                labels = labels[0]
-
-                # Batch post processing
-                batch_processing(image_file, j, labels, preds, preds_aux)
-
-    res, dice_score_list, dice_score_list_ch, iou_score_list = [], [], [], []
-    total = len(datasets[0]) // 1  # Todo: Add batch size
-    infer_net(datasets, loaders, model, total)
 
     dice = np.mean(dice_score_list)
     dice_ch = np.mean(dice_score_list_ch)
@@ -245,10 +237,11 @@ def main(args):
     unet_mobilenet2 = load('../data/severstalmodels/unet_mobilenet2.pth').cuda()
     unet_resnet34 = load('../data/severstalmodels/unet_resnet34.pth').cuda()
     eff_net_v2 = load('../ckpt/traced_effnetb7_1024_mixup_v2.pth').cuda()
-    eff_net = load('../ckpt/traced_effnetb7_mixup_retrain.pth').cuda()
+    effnetb0 = load('../ckpt/effnetb0_final_stage/traced_model.pth').cuda()
+    effnetb7 = load('../ckpt/traced_effnetb7_mixup_retrain.pth').cuda()
     cls = load('../ckpt/traced_effnetb0_classifier_maskdrop.pth').cuda()
 
-    models_list = [eff_net_v2, unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2]
+    models_list = [unet_se_resnext50_32x4d, unet_resnet34, unet_mobilenet2, eff_net_v2, effnetb0]
     models_dict = {}
     for i, model_name in enumerate(ModelNames):
         models_list[i].eval()
@@ -280,6 +273,9 @@ def main(args):
         dice_dict[key] = dice
         iou_dict[key] = iou
 
+    dice, dice_ch, iou, res = calculate_dice_and_iou_ensemble(effnetb7, cls, datasets, loaders, mask_df, thresholds,
+                                                              min_area)
+    table.add_row(['effnetb7+effnetb0', dice, iou])
     logger.info(table)
 
     df = pd.DataFrame(res)
@@ -291,9 +287,6 @@ def main(args):
     df['empty'] = df['EncodedPixels'].map(lambda x: not x)
     classes = df[df['empty'] == False]['Class'].value_counts()
     print(classes)
-
-    dice, dice_ch, iou, res = calculate_dice_and_iou_ensemble(eff_net, cls, datasets, loaders, mask_df, thresholds, min_area)
-    print(dice, dice_ch, iou)
 
 
 def parse_arguments(argv):

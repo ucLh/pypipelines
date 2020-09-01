@@ -19,6 +19,7 @@ from torch.multiprocessing import set_start_method
 from arguments import parse_arguments_train
 from data import provider, visualize, shuffle_minibatch
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
+from lovasz_loss import LovaszHingeLoss
 
 
 class Trainer(object):
@@ -123,10 +124,12 @@ class Trainer(object):
             loss_cls = self.criterion_cls(labels_pred, labels)
             loss_seg = self.criterion(masks_pred, masks)
             loss_dice = DiceLoss.forward(masks_pred, masks)
+            # loss_dice = torch.tensor(5000)
             loss = (loss_cls, loss_seg, loss_dice)
         elif self.mode == TrainerModes.seg:
             masks_pred, labels_pred = self.net(images)
-            loss = self.criterion(masks_pred, masks)
+            # loss = self.criterion(masks_pred, masks)
+            loss = LovaszHingeLoss.forward(masks_pred, masks)
         elif self.mode == TrainerModes.cls:
             masks_pred, labels_pred = self.net(images)
             loss = self.criterion_cls(labels_pred, labels)
@@ -238,12 +241,12 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     if os.path.isfile(args.model):
-        model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
                          aux_params={'classes': 4, 'dropout': 0.75})
         ckpt = torch.load(args.model)
         print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
     else:
-        model = smp.FPN(args.backend, encoder_weights='imagenet', classes=4, activation=None,
+        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
                          aux_params={'classes': 4, 'dropout': 0.75})
 
     for mode in TrainerModes:

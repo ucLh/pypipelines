@@ -2,6 +2,8 @@ import enum
 import logging
 logging.basicConfig(level=logging.DEBUG, filemode='w')
 import os
+import re
+from shutil import copyfile
 
 import numpy as np
 import torch
@@ -42,6 +44,12 @@ def metric(probability, truth, threshold=0.5, reduction='none'):
     '''Calculates dice of positive and negative images seperately'''
     '''probability and truth must be torch tensors'''
     batch_size = len(truth)
+    masks_batch = []
+    for i in range(probability.shape[0]):
+        masks = [(truth[i,0] == v) for v in [i for i in range(probability.shape[1])]]
+        mask_1batch = np.stack(masks, axis=0).astype('float')
+        masks_batch.append(mask_1batch)
+    truth = torch.tensor(np.stack(masks_batch, axis=0).astype('float')).cpu()
     with torch.no_grad():
         probability = probability.view(batch_size, -1)
         truth = truth.view(batch_size, -1)
@@ -200,16 +208,38 @@ def compute_ious(pred, label, classes, ignore_index=255, only_present=True):
 
 def compute_iou_batch(outputs, labels, classes=None):
     '''computes mean iou for a batch of ground truth masks and predicted masks'''
+    masks_batch = []
+    for i in range(outputs.shape[0]):
+        masks = [(labels[i, 0] == v) for v in [i for i in range(outputs.shape[1])]]
+        mask_1batch = np.stack(masks, axis=0).astype('float')
+        masks_batch.append(mask_1batch)
+    labels = np.stack(masks_batch, axis=0).astype('float')
     ious = []
     preds = np.copy(outputs) # copy is imp
-    labels = np.array(labels) # tensor to np
+    # labels = np.array(labels) # tensor to np
     for pred, label in zip(preds, labels):
         ious.append(np.nanmean(compute_ious(pred, label, classes)))
     iou = np.nanmean(ious)
     return iou
+
 
 def set_parameter_requires_grad(model, feature_extracting=True):
     if feature_extracting:
         for param in model.parameters():
             param.requires_grad = False
 
+
+def divide_files(prefix='/home/luch/Programming/Python/autovision/segmentation_dataset/golf_v2_colored/'):
+    names = os.listdir(prefix)
+    names = list(filter(lambda x: os.path.isfile(prefix + x), names))
+    print(len(names))
+    for name in names:
+        src_file = prefix + name
+        if re.search(r'_color_mask', name):
+            dest_file = prefix + 'masks/' + name
+            print(dest_file)
+            copyfile(src_file, dest_file)
+        else:
+            dest_file = prefix + 'images/' + name
+            print(src_file)
+            copyfile(src_file, dest_file)

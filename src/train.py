@@ -1,9 +1,7 @@
-from __future__ import annotations
-from abc import ABC, abstractmethod
-import argparse
 import os
 import sys
 import time
+import warnings
 
 from apex import amp
 import numpy as np
@@ -14,21 +12,24 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 from torch.utils.tensorboard import SummaryWriter
 from torch.multiprocessing import set_start_method
+import torchvision
 # from torchtools.optim import RangerLars
 
 from arguments import parse_arguments_train
-from data import provider, visualize, shuffle_minibatch
+from data import non_df_provider, visualize, shuffle_minibatch
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 from lovasz_loss import LovaszHingeLoss
+
+warnings.filterwarnings('ignore')
 
 
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
     def __init__(self, model, checkpoint, mode, args):
-        self.num_workers = 6
-        self.batch_size = {"train": 4, "val": 4}
+        self.num_workers = 4
+        self.batch_size = {"train": 8, "val": 8}
         self.accumulation_steps = 32 // self.batch_size['train']
-        self.lr = 1e-6
+        self.lr = 1e-4
         self.num_epochs = 190
         self.start_epoch = 0
         self.best_dice = 0
@@ -47,14 +48,13 @@ class Trainer(object):
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
         if checkpoint is not None:
             self.load_checkpoint(checkpoint)
-        self.criterion = torch.nn.BCEWithLogitsLoss()
+        self.criterion = torch.nn.CrossEntropyLoss()
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: provider(
+            phase: non_df_provider(
                 data_folder=self.args.data_root,
-                df_path=self.args.df_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),
@@ -67,7 +67,7 @@ class Trainer(object):
         self.iou_scores = {phase: [] for phase in self.phases}
         self.dice_scores = {phase: [] for phase in self.phases}
         self.logger = MetricsLogger()
-        self.tensorboard_writer = SummaryWriter("../logs/runs")
+        # self.tensorboard_writer = SummaryWriter("../logs/runs")
 
     def load_checkpoint(self, checkpoint):
 
@@ -105,8 +105,8 @@ class Trainer(object):
         amp.load_state_dict(checkpoint["amp"])
         self.start_epoch = checkpoint["epoch"]
         self.best_dice = checkpoint["best_dice"]
-        # self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
-        # self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
+        self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
+        self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
 
     def freeze_backbone_if_needed(self):
         if self.mode == TrainerModes.cls:
@@ -122,14 +122,18 @@ class Trainer(object):
         if self.mode == TrainerModes.combine:
             masks_pred, labels_pred = self.net(images)
             loss_cls = self.criterion_cls(labels_pred, labels)
-            loss_seg = self.criterion(masks_pred, masks)
+            # loss_seg = self.criterion(masks_pred, masks)
+            loss_seg = LovaszHingeLoss.forward(masks_pred, masks)
             loss_dice = DiceLoss.forward(masks_pred, masks)
             # loss_dice = torch.tensor(5000)
             loss = (loss_cls, loss_seg, loss_dice)
         elif self.mode == TrainerModes.seg:
-            masks_pred, labels_pred = self.net(images)
-            # loss = self.criterion(masks_pred, masks)
-            loss = LovaszHingeLoss.forward(masks_pred, masks)
+            masks_pred = self.net(images)
+            masks = masks.type(torch.cuda.LongTensor)
+            loss = self.criterion(masks_pred, masks[:, 0, :, :])
+            # loss = LovaszHingeLoss.forward(masks_pred, masks)
+            # loss_dice = DiceLoss.forward(masks_pred, masks)
+            # loss = loss + loss_dice
         elif self.mode == TrainerModes.cls:
             masks_pred, labels_pred = self.net(images)
             loss = self.criterion_cls(labels_pred, labels)
@@ -153,7 +157,12 @@ class Trainer(object):
         total_batches = len(dataloader)
         self.optimizer.zero_grad()
         for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
-            images, masks, labels = batch
+            try:
+                images, masks, labels = batch
+            except ValueError:
+                images, masks = batch
+                labels = torch.randn(1)
+
             if phase == "train" and self.args.use_mixup:
                 images, masks = shuffle_minibatch(images, masks)
             losses, outputs = self.forward(images, masks, labels)
@@ -187,11 +196,11 @@ class Trainer(object):
         epoch_loss_list = self.postprocess_losses((running_loss, rn_loss_seg, rn_loss_cls, rn_loss_dice), total_batches)
         epoch_loss = epoch_loss_list[0]
         dice, iou = self.logger.epoch_log(self.mode, phase, epoch, epoch_loss_list, meter)
-        self.tensorboard_writer.add_scalar('Loss/' + phase, epoch_loss, epoch)
+        # self.tensorboard_writer.add_scalar('Loss/' + phase, epoch_loss, epoch)
         self.losses[phase].append(epoch_loss)
         if self.mode != TrainerModes.cls:
-            self.tensorboard_writer.add_scalar('Dice/' + phase, dice, epoch)
-            self.tensorboard_writer.add_scalar('Iou/' + phase, iou, epoch)
+            #self.tensorboard_writer.add_scalar('Dice/' + phase, dice, epoch)
+            #self.tensorboard_writer.add_scalar('Iou/' + phase, iou, epoch)
             self.dice_scores[phase].append(dice)
             self.iou_scores[phase].append(iou)
         print('Learning rate: ', self.optimizer.param_groups[0]['lr'])
@@ -230,6 +239,7 @@ class Trainer(object):
                 torch.save(state, "./last_model.pth")
             print()
 
+
 def prepare_and_visualize(image, mask):
     image = np.transpose(image, [1, 2, 0])
     mask = np.transpose(mask, [1, 2, 0])
@@ -240,14 +250,12 @@ def prepare_and_visualize(image, mask):
 
 def main(args):
     ckpt = None
+    # model = torchvision.models.segmentation.fcn_resnet18(num_classes=4, pretrained=False, aux_loss=None, export_onnx=True)
+    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=17, activation=None)
+                    # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
-        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
-                         aux_params={'classes': 4, 'dropout': 0.75})
         ckpt = torch.load(args.model)
         print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
-    else:
-        model = smp.Unet(args.backend, encoder_weights='imagenet', classes=4, activation=None,
-                         aux_params={'classes': 4, 'dropout': 0.75})
 
     for mode in TrainerModes:
         if mode.value == args.mode:

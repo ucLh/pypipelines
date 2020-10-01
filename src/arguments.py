@@ -6,7 +6,7 @@ def parse_arguments_train(argv):
 
     parser.add_argument('--data_root', type=str,
                         help='Path to data directory which needs to be forward passed through the network',
-                        default='../data/Severstal/train_test_images/')
+                        default='/home/luch/Programming/Python/autovision/segmentation_dataset/')
     parser.add_argument('--df_root', type=str,
                         help='Path to csv file with ground truth masks',
                         default='../data/Severstal/train_test.csv')
@@ -14,14 +14,15 @@ def parse_arguments_train(argv):
                         help='Enables mixup augmentation', action='store_true')
     parser.add_argument('--model_name', type=str,
                         help='Name for model with best loss',
-                        default='model.pth')
+                        default='effnetb0_unet_golf.pth')
     parser.add_argument('--mode', choices=['seg', 'cls', 'combine'],
                         help='Training mode. One of "seg", "cls" or "combine"',
-                        default='combine')
+                        default='seg')
     parser.add_argument('--model', type=str,
                         help='Path to (.pth) file',
-                        default='../ckpt/effnetb0_classifier_maskdrop.pth')
+                        # default='../ckpt/effnetb0_final_stage/model.pth')
                         # default='model.pth')
+                        default='effnelovasz_dice.pth')
     parser.add_argument('--backend', type=str,
                         help='Model backend',
                         default='efficientnet-b0')

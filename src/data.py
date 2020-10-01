@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
-                            RandomBrightnessContrast, Resize, MaskDropout)
+                            RandomBrightnessContrast, Resize, MaskDropout, RandomSizedCrop)
 from albumentations.pytorch import ToTensor
 
 
@@ -124,6 +124,63 @@ class SteelDataset(Dataset):
         return img, masks
 
 
+class GolfDataset(Dataset):
+    CLASSES = ['unlabeled', 'sky', 'sand', 'ground',
+               'building', 'poo', 'ball', 'rock_stone',
+               'tree_bush', 'fairway_grass', 'raw_grass', 'hole',
+               'water', 'person', 'animal', 'vehicle', 'green_grass']
+
+    def __init__(
+            self,
+            images_fps,
+            masks_fps,
+            mean,
+            std,
+            phase,
+            classes=None,
+    ):
+        # convert str names to class values on masks
+        self.class_values = [self.CLASSES.index(cls.lower()) for cls in self.CLASSES]
+        self.images_fps = images_fps
+        self.masks_fps = masks_fps
+        self.mean = mean
+        self.std = std
+        self.phase = phase
+        self.transforms = get_transforms(phase, mean, std)
+
+    def __getitem__(self, i):
+
+        # read data
+        image = cv2.imread(self.images_fps[i])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(self.masks_fps[i], 0)
+
+        # extract certain classes from mask (e.g. cars)
+        # masks = [(mask == v) for v in self.class_values]
+        # mask = np.stack(masks, axis=-1).astype('float')
+
+        augmented = self.transforms(image=image, mask=mask)
+        image = augmented['image']
+        # img = self._tensor_to_grayscale(img)
+        mask = augmented['mask']
+        # mask = mask[0].permute(2, 0, 1)
+
+        # # apply augmentations
+        # if self.augmentation:
+        #     sample = self.augmentation(image=image, mask=mask)
+        #     image, mask = sample['image'], sample['mask']
+        #
+        # # apply preprocessing
+        # if self.preprocessing:
+        #     sample = self.preprocessing(image=image, mask=mask)
+        #     image, mask = sample['image'], sample['mask']
+
+        return image, mask
+
+    def __len__(self):
+        return len(self.images_fps)
+
+
 class SteelClassify(SteelDataset):
     def __getitem__(self, idx):
         image_id, mask = make_mask(idx, self.df)
@@ -143,13 +200,13 @@ class SteelClassify(SteelDataset):
 
 def get_transforms(phase, mean, std):
     list_transforms = list()
-    list_transforms.append(RandomCrop(256, 512, p=1))
+    list_transforms.append(RandomSizedCrop((465, 465), 512, 512, p=1))
     # list_transforms.append(Resize(256, 1024, p=1))
     if phase == "train":
         list_transforms.extend(
             [
                 HorizontalFlip(p=0.5),
-                VerticalFlip(p=0.5),
+                # VerticalFlip(p=0.5),
                 RandomBrightnessContrast(p=0.5),
             ]
         )
@@ -161,6 +218,45 @@ def get_transforms(phase, mean, std):
     )
     list_trfms = Compose(list_transforms)
     return list_trfms
+
+
+def get_file_paths(images_dir, masks_dir):
+
+    def paste_mask_postfix(image_name):
+        post = image_name[-4:]  # .png
+        pre = image_name[:-4]
+        return pre + '_color_mask' + post
+
+    image_names = sorted(os.listdir(images_dir))
+    mask_names = list(map(paste_mask_postfix, image_names))
+    images_fps = [os.path.join(images_dir, image_name) for image_name in image_names]
+    masks_fps = [os.path.join(masks_dir, mask_name) for mask_name in mask_names]
+    return images_fps, masks_fps
+
+
+def non_df_provider(data_folder,
+                    phase,
+                    mean=None,
+                    std=None,
+                    batch_size=8,
+                    num_workers=4,
+):
+    images_dir = os.path.join(data_folder, 'images')
+    masks_dir = os.path.join(data_folder, 'indexes')
+    images_fps, masks_fps = get_file_paths(images_dir, masks_dir)
+    fps_zip = list(zip(images_fps, masks_fps))
+    train_fps, val_fps = train_test_split(fps_zip, test_size=0.15, random_state=69) # TODO: Add stratification
+    fps = train_fps if phase == "train" else val_fps
+    images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
+    dataset = GolfDataset(images_fps, masks_fps, mean, std, phase)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    return dataloader
 
 
 def provider(

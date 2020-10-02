@@ -44,12 +44,6 @@ def metric(probability, truth, threshold=0.5, reduction='none'):
     '''Calculates dice of positive and negative images seperately'''
     '''probability and truth must be torch tensors'''
     batch_size = len(truth)
-    masks_batch = []
-    for i in range(probability.shape[0]):
-        masks = [(truth[i,0] == v) for v in [i for i in range(probability.shape[1])]]
-        mask_1batch = np.stack(masks, axis=0).astype('float')
-        masks_batch.append(mask_1batch)
-    truth = torch.tensor(np.stack(masks_batch, axis=0).astype('float')).cpu()
     with torch.no_grad():
         probability = probability.view(batch_size, -1)
         truth = truth.view(batch_size, -1)
@@ -208,15 +202,9 @@ def compute_ious(pred, label, classes, ignore_index=255, only_present=True):
 
 def compute_iou_batch(outputs, labels, classes=None):
     '''computes mean iou for a batch of ground truth masks and predicted masks'''
-    masks_batch = []
-    for i in range(outputs.shape[0]):
-        masks = [(labels[i, 0] == v) for v in [i for i in range(outputs.shape[1])]]
-        mask_1batch = np.stack(masks, axis=0).astype('float')
-        masks_batch.append(mask_1batch)
-    labels = np.stack(masks_batch, axis=0).astype('float')
     ious = []
     preds = np.copy(outputs) # copy is imp
-    # labels = np.array(labels) # tensor to np
+    labels = np.array(labels) # tensor to np
     for pred, label in zip(preds, labels):
         ious.append(np.nanmean(compute_ious(pred, label, classes)))
     iou = np.nanmean(ious)

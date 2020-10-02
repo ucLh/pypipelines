@@ -156,14 +156,14 @@ class GolfDataset(Dataset):
         mask = cv2.imread(self.masks_fps[i], 0)
 
         # extract certain classes from mask (e.g. cars)
-        # masks = [(mask == v) for v in self.class_values]
-        # mask = np.stack(masks, axis=-1).astype('float')
+        masks = [(mask == v) for v in self.class_values]
+        mask = np.stack(masks, axis=-1).astype('float')
 
         augmented = self.transforms(image=image, mask=mask)
         image = augmented['image']
         # img = self._tensor_to_grayscale(img)
         mask = augmented['mask']
-        # mask = mask[0].permute(2, 0, 1)
+        mask = mask[0].permute(2, 0, 1)
 
         # # apply augmentations
         # if self.augmentation:
@@ -200,13 +200,13 @@ class SteelClassify(SteelDataset):
 
 def get_transforms(phase, mean, std):
     list_transforms = list()
-    list_transforms.append(RandomSizedCrop((465, 465), 512, 512, p=1))
+    list_transforms.append(RandomSizedCrop((465, 465), 512, 512, p=1, interpolation=0))
     # list_transforms.append(Resize(256, 1024, p=1))
     if phase == "train":
         list_transforms.extend(
             [
                 HorizontalFlip(p=0.5),
-                # VerticalFlip(p=0.5),
+                # VerticalFlip(p=0.5), 
                 RandomBrightnessContrast(p=0.5),
             ]
         )

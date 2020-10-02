@@ -48,7 +48,7 @@ class Trainer(object):
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
         if checkpoint is not None:
             self.load_checkpoint(checkpoint)
-        self.criterion = torch.nn.CrossEntropyLoss()
+        self.criterion = torch.nn.BCEWithLogitsLoss()
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
         cudnn.benchmark = False
@@ -129,8 +129,8 @@ class Trainer(object):
             loss = (loss_cls, loss_seg, loss_dice)
         elif self.mode == TrainerModes.seg:
             masks_pred = self.net(images)
-            masks = masks.type(torch.cuda.LongTensor)
-            loss = self.criterion(masks_pred, masks[:, 0, :, :])
+            # masks = masks.type(torch.cuda.LongTensor)
+            loss = self.criterion(masks_pred, masks)
             # loss = LovaszHingeLoss.forward(masks_pred, masks)
             # loss_dice = DiceLoss.forward(masks_pred, masks)
             # loss = loss + loss_dice

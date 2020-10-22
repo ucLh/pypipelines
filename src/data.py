@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
-                            RandomBrightnessContrast, Resize, MaskDropout, RandomSizedCrop)
+                            RandomBrightnessContrast, Resize, MaskDropout, RandomSizedCrop,
+                            CoarseDropout)
 from albumentations.pytorch import ToTensor
 
 
@@ -137,10 +138,13 @@ class GolfDataset(Dataset):
             mean,
             std,
             phase,
-            classes=None,
+            classes=('unlabeled', 'sky', 'sand', 'ground', 'tree_bush', 'fairway_grass', 'raw_grass',
+                     'person', 'animal', 'vehicle', 'green_grass',)
     ):
         # convert str names to class values on masks
-        self.class_values = [self.CLASSES.index(cls.lower()) for cls in self.CLASSES]
+        self.class_values = [self.CLASSES.index(cls.lower()) for cls in classes]
+        self.garbage_classes = [self.CLASSES.index(cls.lower()) for cls in ('building', 'poo', 'ball', 'rock_stone',
+                                                                            'hole', 'water',)]
         self.images_fps = images_fps
         self.masks_fps = masks_fps
         self.mean = mean
@@ -154,9 +158,13 @@ class GolfDataset(Dataset):
         image = cv2.imread(self.images_fps[i])
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(self.masks_fps[i], 0)
+        # print(self.images_fps[i], image.shape)
 
         # extract certain classes from mask (e.g. cars)
         masks = [(mask == v) for v in self.class_values]
+        garbage_masks = [(mask == v) for v in self.garbage_classes]
+        garbage_mask = np.logical_or.reduce(garbage_masks)
+        masks.append(garbage_mask)
         mask = np.stack(masks, axis=-1).astype('float')
 
         augmented = self.transforms(image=image, mask=mask)
@@ -200,14 +208,23 @@ class SteelClassify(SteelDataset):
 
 def get_transforms(phase, mean, std):
     list_transforms = list()
-    list_transforms.append(RandomSizedCrop((465, 465), 512, 512, p=1, interpolation=0))
-    # list_transforms.append(Resize(256, 1024, p=1))
+    # list_transforms.append(RandomSizedCrop((465, 930), 512, 1024, p=1, interpolation=0))
+    # list_transforms.append(RandomCrop(448, 768, p=1))
     if phase == "train":
         list_transforms.extend(
             [
+                RandomCrop(448, 448, p=1),
+                CoarseDropout(max_holes=5, max_width=70, max_height=70, min_width=30, min_height=30,
+                              mask_fill_value=0, p=0.5),
                 HorizontalFlip(p=0.5),
-                # VerticalFlip(p=0.5), 
+                # VerticalFlip(p=0.5),
                 RandomBrightnessContrast(p=0.5),
+            ]
+        )
+    if phase == "val":
+        list_transforms.extend(
+            [
+                Resize(640, 640, interpolation=0),
             ]
         )
     list_transforms.extend(
@@ -246,6 +263,8 @@ def non_df_provider(data_folder,
     images_fps, masks_fps = get_file_paths(images_dir, masks_dir)
     fps_zip = list(zip(images_fps, masks_fps))
     train_fps, val_fps = train_test_split(fps_zip, test_size=0.15, random_state=69) # TODO: Add stratification
+    # val_image_fps, _ = list(zip(*val_fps))
+    # print(val_image_fps)
     fps = train_fps if phase == "train" else val_fps
     images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
     dataset = GolfDataset(images_fps, masks_fps, mean, std, phase)

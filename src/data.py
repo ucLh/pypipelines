@@ -12,7 +12,7 @@ import pandas as pd
 
 from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
                             RandomBrightnessContrast, Resize, MaskDropout, RandomSizedCrop,
-                            CoarseDropout)
+                            CoarseDropout, OpticalDistortion)
 from albumentations.pytorch import ToTensor
 
 
@@ -138,11 +138,13 @@ class GolfDataset(Dataset):
             mean,
             std,
             phase,
-            classes=('unlabeled', 'sky', 'sand', 'ground', 'tree_bush', 'fairway_grass', 'raw_grass',
-                     'person', 'animal', 'vehicle', 'green_grass',)
+            transorfms_func,
+            classes=('unlabeled', 'sky', 'sand', 'ground', 'tree_bush', 'raw_grass',
+                     'person', 'animal', 'vehicle',)
     ):
         # convert str names to class values on masks
         self.class_values = [self.CLASSES.index(cls.lower()) for cls in classes]
+        self.grass_classes = [self.CLASSES.index(cls.lower()) for cls in ['fairway_grass', 'green_grass']]
         self.garbage_classes = [self.CLASSES.index(cls.lower()) for cls in ('building', 'poo', 'ball', 'rock_stone',
                                                                             'hole', 'water',)]
         self.images_fps = images_fps
@@ -150,38 +152,40 @@ class GolfDataset(Dataset):
         self.mean = mean
         self.std = std
         self.phase = phase
-        self.transforms = get_transforms(phase, mean, std)
+        self.transforms = transorfms_func(phase, mean, std)
+
+    @staticmethod
+    def _tensor_to_grayscale(img_tensor):
+        # img_tensor = img_tensor[0, :, :]
+        img_tensor = (img_tensor - img_tensor.min()) / (img_tensor - img_tensor.max())
+        return img_tensor[np.newaxis, ...]
 
     def __getitem__(self, i):
 
         # read data
-        image = cv2.imread(self.images_fps[i])
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.imread(self.images_fps[i], cv2.IMREAD_GRAYSCALE)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         mask = cv2.imread(self.masks_fps[i], 0)
-        # print(self.images_fps[i], image.shape)
+        print(self.images_fps[i])
 
-        # extract certain classes from mask (e.g. cars)
-        masks = [(mask == v) for v in self.class_values]
+        # unite two types of grass in one class
+        grass_masks = [(mask == v) for v in self.grass_classes]
+        grass_mask = np.logical_or.reduce(grass_masks)
+
+        # unite all auxiliary classes in one garbage class
         garbage_masks = [(mask == v) for v in self.garbage_classes]
         garbage_mask = np.logical_or.reduce(garbage_masks)
+
+        masks = [(mask == v) for v in self.class_values]
+        masks.append(grass_mask)
         masks.append(garbage_mask)
         mask = np.stack(masks, axis=-1).astype('float')
 
         augmented = self.transforms(image=image, mask=mask)
         image = augmented['image']
-        # img = self._tensor_to_grayscale(img)
+        # image = self._tensor_to_grayscale(image)
         mask = augmented['mask']
         mask = mask[0].permute(2, 0, 1)
-
-        # # apply augmentations
-        # if self.augmentation:
-        #     sample = self.augmentation(image=image, mask=mask)
-        #     image, mask = sample['image'], sample['mask']
-        #
-        # # apply preprocessing
-        # if self.preprocessing:
-        #     sample = self.preprocessing(image=image, mask=mask)
-        #     image, mask = sample['image'], sample['mask']
 
         return image, mask
 
@@ -213,18 +217,20 @@ def get_transforms(phase, mean, std):
     if phase == "train":
         list_transforms.extend(
             [
-                RandomCrop(448, 448, p=1),
+                RandomCrop(448, 930, p=1),
                 CoarseDropout(max_holes=5, max_width=70, max_height=70, min_width=30, min_height=30,
                               mask_fill_value=0, p=0.5),
                 HorizontalFlip(p=0.5),
                 # VerticalFlip(p=0.5),
                 RandomBrightnessContrast(p=0.5),
+                OpticalDistortion(distort_limit=0.5, shift_limit=1, interpolation=cv2.INTER_NEAREST,
+                                  border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1),
             ]
         )
     if phase == "val":
         list_transforms.extend(
             [
-                Resize(640, 640, interpolation=0),
+                Resize(640, 1280, interpolation=0),
             ]
         )
     list_transforms.extend(
@@ -267,7 +273,7 @@ def non_df_provider(data_folder,
     # print(val_image_fps)
     fps = train_fps if phase == "train" else val_fps
     images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
-    dataset = GolfDataset(images_fps, masks_fps, mean, std, phase)
+    dataset = GolfDataset(images_fps, masks_fps, mean, std, phase, get_transforms)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,

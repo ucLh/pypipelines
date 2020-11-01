@@ -1,5 +1,4 @@
 from enum import Enum
-import math
 import os
 
 import cv2
@@ -164,7 +163,7 @@ class GolfDataset(Dataset):
 
         # read data
         image = cv2.imread(self.images_fps[i], cv2.IMREAD_GRAYSCALE)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(self.masks_fps[i], 0)
         print(self.images_fps[i])
 

@@ -15,7 +15,7 @@ def read_and_crop_image(input_file_path, x_min, x_max, y_min, y_max):
 
 def process_image(image_path, output_name):
     # print(image_path)
-    img_cropped = read_and_crop_image(image_path, 331, 1755, 150, 1150)
+    img_cropped = read_and_crop_image(image_path, 331, 1755, 150, 850)
     cv2.imwrite(output_name, img_cropped)
 
 
@@ -39,13 +39,10 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--images_path', type=str,
                         help='Path to an image or a directory for inference',
-                        default='/home/luch/Programming/Python/Datasets/golf/left_3')
+                        default='/home/luch/Programming/Python/Datasets/golf/left_1')
     parser.add_argument('--output_dir', type=str,
                         help='Path to a directory for inference',
-                        default='/home/luch/Programming/Python/Datasets/golf/cropped/left_3')
-    parser.add_argument('--size', nargs=2, metavar=('newfile', 'oldfile'),
-                        help='Width followed by the height of the image that network was configured to inference',
-                        default=(640, 320))
+                        default='/home/luch/Programming/Python/Datasets/golf/cropped/left_1_2')
     return parser.parse_args(argv)
 
 

@@ -165,7 +165,7 @@ class GolfDataset(Dataset):
         image = cv2.imread(self.images_fps[i], cv2.IMREAD_GRAYSCALE)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(self.masks_fps[i], 0)
-        print(self.images_fps[i])
+        # print(self.images_fps[i])
 
         # unite two types of grass in one class
         grass_masks = [(mask == v) for v in self.grass_classes]

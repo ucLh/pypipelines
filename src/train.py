@@ -3,7 +3,7 @@ import sys
 import time
 import warnings
 
-from apex import amp
+# from apex import amp
 import numpy as np
 import segmentation_models_pytorch as smp
 import torch
@@ -26,11 +26,11 @@ warnings.filterwarnings('ignore')
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
     def __init__(self, model, checkpoint, mode, args):
-        self.num_workers = 4
-        self.batch_size = {"train": 8, "val": 8}
+        self.num_workers = 1
+        self.batch_size = {"train": 1, "val": 1}
         self.accumulation_steps = 32 // self.batch_size['train']
-        self.lr = 1e-4
-        self.num_epochs = 190
+        self.lr = 1e-5
+        self.num_epochs = 120
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
@@ -43,7 +43,8 @@ class Trainer(object):
         self.net = model
         self.net = self.net.to(self.device)
         self.freeze_backbone_if_needed()
-        self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr), opt_level="O1")
+        self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
+        # self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr), opt_level="O1")
         self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
         if checkpoint is not None:
@@ -100,12 +101,12 @@ class Trainer(object):
                 print("Successfully loaded model without classifier")
 
         load_model_state_dict(self.net, checkpoint, self.args.backend)
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
-        try_to_load(self.scheduler, checkpoint, "scheduler")
-        amp.load_state_dict(checkpoint["amp"])
+        # self.optimizer.load_state_dict(checkpoint["optimizer"])
+        # try_to_load(self.scheduler, checkpoint, "scheduler")
+        # amp.load_state_dict(checkpoint["amp"])
         self.start_epoch = checkpoint["epoch"]
         self.best_dice = checkpoint["best_dice"]
-        self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
+        # self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
         self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
 
     def freeze_backbone_if_needed(self):
@@ -178,8 +179,9 @@ class Trainer(object):
                 loss /= self.accumulation_steps
 
             if phase == "train":
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                    scaled_loss.backward()
+                loss.backward()
+                # with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                #     scaled_loss.backward()
                 if (itr + 1) % self.accumulation_steps == 0:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
@@ -218,7 +220,7 @@ class Trainer(object):
                 "best_seg_loss": self.best_seg_loss,
                 "state_dict": self.net.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "amp": amp.state_dict(),
+                # "amp": amp.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
             }
             with torch.no_grad():
@@ -244,14 +246,14 @@ def prepare_and_visualize(image, mask):
     image = np.transpose(image, [1, 2, 0])
     mask = np.transpose(mask, [1, 2, 0])
     # print(image.shape, mask.shape)
-    for i in range(4):
+    for i in range(11):
         visualize(image=image[:, :, 0], mask=mask[:, :, i])
 
 
 def main(args):
     ckpt = None
     # model = torchvision.models.segmentation.fcn_resnet18(num_classes=4, pretrained=False, aux_loss=None, export_onnx=True)
-    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=17, activation=None)
+    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=11, activation=None)
                     # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
         ckpt = torch.load(args.model)
@@ -269,6 +271,7 @@ def main(args):
     #     print('pass')
     #     break
     # image_raw, mask_raw = batch
+    # print(image_raw.shape, end='\n')
     #
     # image, mask = image_raw[0], mask_raw[0]
     # prepare_and_visualize(image, mask)

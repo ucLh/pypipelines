@@ -120,16 +120,16 @@ def parse_arguments(argv):
     parser.add_argument('--model_name', type=str,
                         help='Name of a pth file in ../ckpt dir',
                         # default='effnetb0_unet_golf_classes_last.pth')
-                        default='last_model.pth')
+                        default='effnetb0_unet_golf_fake_class.pth')
     parser.add_argument('--images_path', type=str,
                         help='Path to an image or a directory for inference',
                         default='../../autovision/segmentation_dataset/val_images/')
     parser.add_argument('--output_dir', type=str,
                         help='Path to a directory for inference',
-                        default='../../autovision/segmentation_dataset/val_preds640_2/')
+                        default='../../autovision/segmentation_dataset/val_preds640/')
     parser.add_argument('--size', nargs=2, metavar=('newfile', 'oldfile'),
                         help='Width followed by the height of the image that network was configured to inference',
-                        default=(1280, 640))
+                        default=(640, 320))
     return parser.parse_args(argv)
 
 

@@ -13,6 +13,10 @@ from arguments import parse_arguments_train
 from data import non_df_provider, visualize, shuffle_minibatch
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 
+import onnx
+import caffe2.python.onnx.backend
+from caffe2.python import core, workspace
+
 warnings.filterwarnings('ignore')
 
 
@@ -114,6 +118,10 @@ class Trainer(object):
             loss = (loss_cls, loss_seg, loss_dice)
         elif self.mode == TrainerModes.seg:
             masks_pred = self.net(images)
+            # modelFile = onnx.load('effnetb0_unet_golfv2_320x640.onnx')
+            # inputArray = images.cpu().numpy()
+            # output = caffe2.python.onnx.backend.run_model(modelFile, inputArray.astype(np.float32))
+
             loss = self.criterion(masks_pred, masks)
         elif self.mode == TrainerModes.cls:
             masks_pred, labels_pred = self.net(images)

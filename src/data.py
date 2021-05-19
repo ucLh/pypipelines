@@ -9,10 +9,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import albumentations as albu
 from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
                             RandomBrightnessContrast, Resize, MaskDropout, RandomSizedCrop,
                             CoarseDropout, OpticalDistortion)
-from albumentations.pytorch import ToTensor
+from albumentations.pytorch import ToTensor, ToTensorV2
 
 
 class DatasetTypes(Enum):
@@ -192,6 +193,54 @@ class GolfDataset(Dataset):
         return len(self.images_fps)
 
 
+class WGISDMaskedDataset(Dataset):
+    def __init__(self, root, transforms=None, source='train'):
+        self.root = root
+        self.transforms = transforms
+
+        # Let's load the dataset subset defined by source
+        if source not in ('train', 'val'):
+            print('source should by "train" or "val"')
+            return None
+
+        source_path = os.path.join(root, f'{source}.txt')
+        with open(source_path, 'r') as fp:
+            # Read all lines in file
+            lines = fp.readlines()
+            # Recover the items ids, removing the \n at the end
+            ids = [l.rstrip() for l in lines]
+
+        self.imgs = [os.path.join(root, 'data', f'{id}.jpg') for id in ids]
+        self.masks = [os.path.join(root, 'data', f'{id}.npz') for id in ids]
+        self.boxes = [os.path.join(root, 'data', f'{id}.txt') for id in ids]
+
+    def __getitem__(self, idx):
+        # Load images and masks
+        img_path = self.imgs[idx]
+        mask_path = self.masks[idx]
+
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
+        # img /= 255
+
+        wgisd_masks = np.load(mask_path)['arr_0'].astype(np.uint8)
+        mask = np.logical_or.reduce([mask_ for mask_ in np.rollaxis(wgisd_masks, -1)]) * 1
+        mask = np.expand_dims(mask, -1)
+
+        augmented = self.transforms(image=img, mask=mask)
+
+        img = augmented['image']
+        mask = augmented['mask']
+
+        mask = mask[0].permute(2, 0, 1)
+        mask = torch.as_tensor(mask, dtype=torch.float32)
+
+        return img, mask
+
+    def __len__(self):
+        return len(self.imgs)
+
+
 class SteelClassify(SteelDataset):
     def __getitem__(self, idx):
         image_id, mask = make_mask(idx, self.df)
@@ -216,12 +265,12 @@ def get_transforms(phase, mean, std):
     if phase == "train":
         list_transforms.extend(
             [
-                RandomCrop(448, 930, p=1),
+                RandomCrop(512, 512, p=1),
                 CoarseDropout(max_holes=5, max_width=70, max_height=70, min_width=30, min_height=30,
                               mask_fill_value=0, p=0.5),
                 HorizontalFlip(p=0.5),
                 # VerticalFlip(p=0.5),
-                RandomBrightnessContrast(p=0.5),
+                # RandomBrightnessContrast(p=0.5),
                 OpticalDistortion(distort_limit=0.5, shift_limit=1, interpolation=cv2.INTER_NEAREST,
                                   border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1),
             ]
@@ -229,7 +278,7 @@ def get_transforms(phase, mean, std):
     if phase == "val":
         list_transforms.extend(
             [
-                Resize(640, 1280, interpolation=0),
+                Resize(1344, 2048, interpolation=0),
             ]
         )
     list_transforms.extend(
@@ -256,12 +305,13 @@ def get_file_paths(images_dir, masks_dir):
     return images_fps, masks_fps
 
 
-def non_df_provider(data_folder,
-                    phase,
-                    mean=None,
-                    std=None,
-                    batch_size=8,
-                    num_workers=4,
+def non_df_provider(
+        data_folder,
+        phase,
+        mean=None,
+        std=None,
+        batch_size=8,
+        num_workers=1,
 ):
     images_dir = os.path.join(data_folder, 'images')
     masks_dir = os.path.join(data_folder, 'indexes')
@@ -273,6 +323,26 @@ def non_df_provider(data_folder,
     fps = train_fps if phase == "train" else val_fps
     images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
     dataset = GolfDataset(images_fps, masks_fps, mean, std, phase, get_transforms)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    return dataloader
+
+
+def wgisd_provider(
+        data_folder,
+        phase,
+        mean=None,
+        std=None,
+        batch_size=8,
+        num_workers=4,
+):
+    transforms = get_transforms(phase, mean, std)
+    dataset = WGISDMaskedDataset(data_folder, transforms=transforms, source=phase)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -465,3 +535,21 @@ def shuffle_minibatch_combined(inputs, targets, masks, mixup=True):
     masks_shuffle = masks1 + masks2
 
     return inputs_shuffle, targets_shuffle, masks_shuffle
+
+if __name__ == '__main__':
+    all_names = os.listdir('../../autovision/wgisd/data')
+    all_names = list(filter(lambda x: x.endswith('.jpg'), all_names))
+    all_paths = set([os.path.join('../../autovision/wgisd/data', name) for name in all_names])
+    dataset_train = WGISDMaskedDataset('../../autovision/wgisd')
+    dataset_val = WGISDMaskedDataset('../../autovision/wgisd', source='val')
+
+    train_paths = dataset_train.imgs
+    val_paths = dataset_val.imgs
+    # not_train = all_paths - train_paths
+    import subprocess
+    for path in val_paths:
+        dir_name = os.path.dirname(path).split('/')[:-1]
+        dir_name = '/'.join(dir_name)
+        dir_name += '/box_val'
+        print(path)
+        subprocess.run(f'cp {path} {dir_name}', shell=True)

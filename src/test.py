@@ -10,7 +10,7 @@ import torch.backends.cudnn as cudnn
 from torch.multiprocessing import set_start_method
 
 from arguments import parse_arguments_train
-from data import non_df_provider, visualize, shuffle_minibatch
+from data import visualize, wgisd_provider
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 
 import onnx
@@ -46,7 +46,7 @@ class Trainer(object):
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: non_df_provider(
+            phase: wgisd_provider(
                 data_folder=self.args.data_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
@@ -104,6 +104,12 @@ class Trainer(object):
             set_parameter_requires_grad(self.net.decoder)
             set_parameter_requires_grad(self.net.segmentation_head)
 
+    @staticmethod
+    def threshold_preds(masks_pred):
+        masks_pred[masks_pred < 0.001] = -1.
+        masks_pred[masks_pred >= 0.001] = 1.
+        return masks_pred
+
     def forward(self, images, target_masks, target_lables):
         images = images.to(self.device)
         masks = target_masks.to(self.device)
@@ -118,6 +124,7 @@ class Trainer(object):
             loss = (loss_cls, loss_seg, loss_dice)
         elif self.mode == TrainerModes.seg:
             masks_pred = self.net(images)
+            masks_pred = self.threshold_preds(masks_pred)
             # modelFile = onnx.load('effnetb0_unet_golfv2_320x640.onnx')
             # inputArray = images.cpu().numpy()
             # output = caffe2.python.onnx.backend.run_model(modelFile, inputArray.astype(np.float32))
@@ -199,7 +206,7 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     # model = torchvision.models.segmentation.fcn_resnet18(num_classes=4, pretrained=False, aux_loss=None, export_onnx=True)
-    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=12, activation=None)
+    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=1, activation=None)
                     # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
         ckpt = torch.load(args.model)

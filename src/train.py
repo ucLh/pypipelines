@@ -16,7 +16,7 @@ import torchvision
 # from torchtools.optim import RangerLars
 
 from arguments import parse_arguments_train
-from data import non_df_provider, visualize, shuffle_minibatch
+from data import non_df_provider, visualize, shuffle_minibatch, wgisd_provider
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 from lovasz_loss import LovaszHingeLoss
 
@@ -29,7 +29,7 @@ class Trainer(object):
         self.num_workers = 1
         self.batch_size = {"train": 1, "val": 1}
         self.accumulation_steps = 32 // self.batch_size['train']
-        self.lr = 1e-5
+        self.lr = 5e-5
         self.num_epochs = 120
         self.start_epoch = 0
         self.best_dice = 0
@@ -54,7 +54,7 @@ class Trainer(object):
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: non_df_provider(
+            phase: wgisd_provider(
                 data_folder=self.args.data_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
@@ -253,7 +253,7 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     # model = torchvision.models.segmentation.fcn_resnet18(num_classes=4, pretrained=False, aux_loss=None, export_onnx=True)
-    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=11, activation=None)
+    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=1, activation=None)
                     # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
         ckpt = torch.load(args.model)

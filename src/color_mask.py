@@ -8,6 +8,8 @@ import numpy as np
 import segmentation_models_pytorch as smp
 import torch
 
+from arguments import parse_arguments_color_mask
+
 
 def load_model(model_name, num_classes):
     model = smp.Unet("efficientnet-b0", encoder_weights=None, classes=num_classes, activation=None, )
@@ -98,29 +100,5 @@ def main(args):
             color_image(model, os.path.join(images_path, name), args.size, output_name, color_map)
 
 
-def parse_arguments(argv):
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--model_name', type=str,
-                        help='Name of a pth file in ../ckpt dir',
-                        default='../ckpt/autovis/effnetb0_unet_gray_2grass_iou55.pth')
-    parser.add_argument('--images_path', type=str,
-                        help='Path to an image or a directory for inference',
-                        default='../../autovision/segmentation_dataset/gray_images/')
-    parser.add_argument('--output_dir', type=str,
-                        help='Path to a directory for inference',
-                        default='../../autovision/segmentation_dataset/val_preds640_2/')
-    parser.add_argument('--size', nargs=2, metavar=('width', 'height'),
-                        help='Width followed by the height of the image that network was configured to inference',
-                        default=(1280, 640))
-    parser.add_argument('--colors', type=str,
-                        help='Path to a csv file with color map',
-                        default='colors_grass.csv')
-    parser.add_argument('--num_classes', type=int,
-                        help='Number of semantic classes for the model',
-                        default=11)
-    return parser.parse_args(argv)
-
-
 if __name__ == '__main__':
-    main(parse_arguments(sys.argv[1:]))
+    main(parse_arguments_color_mask(sys.argv[1:]))

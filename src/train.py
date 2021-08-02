@@ -10,13 +10,10 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
-from torch.utils.tensorboard import SummaryWriter
 from torch.multiprocessing import set_start_method
-import torchvision
-# from torchtools.optim import RangerLars
 
 from arguments import parse_arguments_train
-from data import non_df_provider, visualize, shuffle_minibatch, wgisd_provider
+from data import non_df_provider, visualize, shuffle_minibatch
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 from lovasz_loss import LovaszHingeLoss
 
@@ -29,8 +26,8 @@ class Trainer(object):
         self.num_workers = 1
         self.batch_size = {"train": 1, "val": 1}
         self.accumulation_steps = 32 // self.batch_size['train']
-        self.lr = 5e-5
-        self.num_epochs = 120
+        self.lr = 1e-3
+        self.num_epochs = 2
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
@@ -45,7 +42,7 @@ class Trainer(object):
         self.freeze_backbone_if_needed()
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
         # self.net, self.optimizer = amp.initialize(model, optim.Adam(self.net.parameters(), lr=self.lr), opt_level="O1")
-        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=5, eta_min=1e-9)
+        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=10, eta_min=1e-9)
         # self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.num_epochs)
         if checkpoint is not None:
             self.load_checkpoint(checkpoint)
@@ -54,7 +51,7 @@ class Trainer(object):
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: wgisd_provider(
+            phase: non_df_provider(
                 data_folder=self.args.data_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
@@ -106,7 +103,7 @@ class Trainer(object):
         # amp.load_state_dict(checkpoint["amp"])
         self.start_epoch = checkpoint["epoch"]
         self.best_dice = checkpoint["best_dice"]
-        # self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
+        self.best_loss = try_to_assign(checkpoint, "best_loss", self.best_loss)
         self.best_seg_loss = try_to_assign(checkpoint, "best_seg_loss", self.best_seg_loss)
 
     def freeze_backbone_if_needed(self):
@@ -132,9 +129,9 @@ class Trainer(object):
             masks_pred = self.net(images)
             # masks = masks.type(torch.cuda.LongTensor)
             loss = self.criterion(masks_pred, masks)
-            # loss = LovaszHingeLoss.forward(masks_pred, masks)
-            # loss_dice = DiceLoss.forward(masks_pred, masks)
-            # loss = loss + loss_dice
+            # loss_hinge = LovaszHingeLoss.forward(masks_pred, masks)
+            loss_dice = DiceLoss.forward(masks_pred, masks)
+            loss = loss + loss_dice
         elif self.mode == TrainerModes.cls:
             masks_pred, labels_pred = self.net(images)
             loss = self.criterion_cls(labels_pred, labels)
@@ -231,6 +228,10 @@ class Trainer(object):
                 print("******** New optimal found, saving state ********")
                 state["best_loss"] = self.best_loss = val_loss
                 torch.save(state, self.args.model_name)
+            if val_dice <= self.best_dice:
+                print("******** New best dice, saving state ********")
+                state["best_dice"] = self.best_dice = val_dice
+                torch.save(state, "./best_dice.pth")
             elif self.mode == "combine":
                 if losses[1] <= self.best_seg_loss:
                     print("******** New suboptimal found, saving state ********")
@@ -253,7 +254,7 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     # model = torchvision.models.segmentation.fcn_resnet18(num_classes=4, pretrained=False, aux_loss=None, export_onnx=True)
-    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=1, activation=None)
+    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=args.num_classes, activation=None)
                     # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
         ckpt = torch.load(args.model)
@@ -266,7 +267,7 @@ def main(args):
 
     model_trainer = Trainer(model, ckpt, train_mode, args)
     model_trainer.start()
-    # Visualization check
+    # # Visualization check
     # for i, batch in enumerate(model_trainer.dataloaders["train"]):
     #     print('pass')
     #     break

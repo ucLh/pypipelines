@@ -10,12 +10,8 @@ import torch.backends.cudnn as cudnn
 from torch.multiprocessing import set_start_method
 
 from arguments import parse_arguments_train
-from data import visualize, wgisd_provider
+from data import visualize, non_df_provider
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
-
-import onnx
-import caffe2.python.onnx.backend
-from caffe2.python import core, workspace
 
 warnings.filterwarnings('ignore')
 
@@ -46,7 +42,7 @@ class Trainer(object):
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: wgisd_provider(
+            phase: non_df_provider(
                 data_folder=self.args.data_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
@@ -206,7 +202,7 @@ def prepare_and_visualize(image, mask):
 def main(args):
     ckpt = None
     # model = torchvision.models.segmentation.fcn_resnet18(num_classes=4, pretrained=False, aux_loss=None, export_onnx=True)
-    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=1, activation=None)
+    model = smp.Unet(args.backend, encoder_weights='imagenet', classes=args.num_classes, activation=None)
                     # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
         ckpt = torch.load(args.model)

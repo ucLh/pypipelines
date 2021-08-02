@@ -133,26 +133,33 @@ class GolfDataset(Dataset):
 
     def __init__(
             self,
-            images_fps,
-            masks_fps,
-            mean,
-            std,
+            data_folder,
             phase,
-            transorfms_func,
-            classes=('unlabeled', 'sky', 'sand', 'ground', 'tree_bush', 'raw_grass',
-                     'person', 'animal', 'vehicle',)
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            classes=('tree_bush', 'person', 'animal', 'vehicle')
     ):
         # convert str names to class values on masks
         self.class_values = [self.CLASSES.index(cls.lower()) for cls in classes]
         self.grass_classes = [self.CLASSES.index(cls.lower()) for cls in ['fairway_grass', 'green_grass']]
         self.garbage_classes = [self.CLASSES.index(cls.lower()) for cls in ('building', 'poo', 'ball', 'rock_stone',
                                                                             'hole', 'water',)]
-        self.images_fps = images_fps
-        self.masks_fps = masks_fps
+        self.phase = phase
+        self._get_fps(data_folder)
         self.mean = mean
         self.std = std
-        self.phase = phase
-        self.transforms = transorfms_func(phase, mean, std)
+        self.transforms = get_transforms(phase, mean, std)
+
+    def _get_fps(self, data_folder):
+        images_dir = os.path.join(data_folder, 'images')
+        masks_dir = os.path.join(data_folder, 'indexes')
+        images_fps, masks_fps = get_file_paths(images_dir, masks_dir)
+        fps_zip = list(zip(images_fps, masks_fps))
+        train_fps, val_fps = train_test_split(fps_zip, test_size=0.15, random_state=69)  # TODO: Add stratification
+        fps = train_fps if self.phase == "train" else val_fps
+        images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
+        self.images_fps = images_fps
+        self.masks_fps = masks_fps
 
     @staticmethod
     def _tensor_to_grayscale(img_tensor):
@@ -177,14 +184,14 @@ class GolfDataset(Dataset):
         garbage_mask = np.logical_or.reduce(garbage_masks)
 
         masks = [(mask == v) for v in self.class_values]
-        masks.append(grass_mask)
-        masks.append(garbage_mask)
+        # masks.append(grass_mask)
+        # masks.append(garbage_mask)
         mask = np.stack(masks, axis=-1).astype('float')
 
-        augmented = self.transforms(image=image, mask=mask)
-        image = augmented['image']
-        # image = self._tensor_to_grayscale(image)
-        mask = augmented['mask']
+        if self.transforms is not None:
+            augmented = self.transforms(image=image, mask=mask)
+            image = augmented['image']
+            mask = augmented['mask']
         mask = mask[0].permute(2, 0, 1)
 
         return image, mask
@@ -241,6 +248,59 @@ class WGISDMaskedDataset(Dataset):
         return len(self.imgs)
 
 
+class WGISDBerriesMaskedDataset(Dataset):
+    CLASSES = ['unlabeled', 'berry', 'border']
+
+    def __init__(
+            self,
+            images_fps,
+            masks_fps,
+            mean,
+            std,
+            phase,
+            transorfms_func,
+            classes=('unlabeled', 'berry', 'border')
+    ):
+        # convert str names to class values on masks
+        self.class_values = [self.CLASSES.index(cls.lower()) for cls in classes]
+
+        self.images_fps = images_fps
+        self.masks_fps = masks_fps
+        self.mean = mean
+        self.std = std
+        self.phase = phase
+        self.transforms = transorfms_func(phase, mean, std)
+
+    @staticmethod
+    def _tensor_to_grayscale(img_tensor):
+        # img_tensor = img_tensor[0, :, :]
+        img_tensor = (img_tensor - img_tensor.min()) / (img_tensor - img_tensor.max())
+        return img_tensor[np.newaxis, ...]
+
+    def __getitem__(self, i):
+        # read data
+        image = cv2.imread(self.images_fps[i])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(self.masks_fps[i], 0)
+        # print(self.images_fps[i])
+
+        masks = [(mask == v) for v in self.class_values]
+        mask = np.stack(masks, axis=-1).astype('float')
+
+        for i in range(10):
+            augmented = self.transforms(image=image, mask=mask)
+            image_aug = augmented['image']
+            mask_aug = augmented['mask']
+            if torch.max(mask_aug) > 0:
+                break
+        mask_aug = mask_aug[0].permute(2, 0, 1)
+
+        return image_aug, mask_aug
+
+    def __len__(self):
+        return len(self.images_fps)
+
+
 class SteelClassify(SteelDataset):
     def __getitem__(self, idx):
         image_id, mask = make_mask(idx, self.df)
@@ -265,11 +325,11 @@ def get_transforms(phase, mean, std):
     if phase == "train":
         list_transforms.extend(
             [
-                RandomCrop(512, 512, p=1),
+                RandomCrop(448, 800, p=1),
                 CoarseDropout(max_holes=5, max_width=70, max_height=70, min_width=30, min_height=30,
                               mask_fill_value=0, p=0.5),
                 HorizontalFlip(p=0.5),
-                # VerticalFlip(p=0.5),
+                VerticalFlip(p=0.5),
                 # RandomBrightnessContrast(p=0.5),
                 OpticalDistortion(distort_limit=0.5, shift_limit=1, interpolation=cv2.INTER_NEAREST,
                                   border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1),
@@ -313,16 +373,7 @@ def non_df_provider(
         batch_size=8,
         num_workers=1,
 ):
-    images_dir = os.path.join(data_folder, 'images')
-    masks_dir = os.path.join(data_folder, 'indexes')
-    images_fps, masks_fps = get_file_paths(images_dir, masks_dir)
-    fps_zip = list(zip(images_fps, masks_fps))
-    train_fps, val_fps = train_test_split(fps_zip, test_size=0.15, random_state=69) # TODO: Add stratification
-    # val_image_fps, _ = list(zip(*val_fps))
-    # print(val_image_fps)
-    fps = train_fps if phase == "train" else val_fps
-    images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
-    dataset = GolfDataset(images_fps, masks_fps, mean, std, phase, get_transforms)
+    dataset = GolfDataset(data_folder, phase, mean=mean, std=std)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -343,6 +394,35 @@ def wgisd_provider(
 ):
     transforms = get_transforms(phase, mean, std)
     dataset = WGISDMaskedDataset(data_folder, transforms=transforms, source=phase)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    return dataloader
+
+
+def wgisd_berries_provider(
+        data_folder,
+        phase,
+        mean=None,
+        std=None,
+        batch_size=8,
+        num_workers=1,
+):
+    if phase == 'train':
+        images_dir = os.path.join(data_folder, 'box_train')
+        masks_dir = os.path.join(data_folder, 'berries_masks/train')
+    else:
+        images_dir = os.path.join(data_folder, 'box_val')
+        masks_dir = os.path.join(data_folder, 'berries_masks/val')
+
+    image_names = sorted(os.listdir(images_dir))
+    images_fps = [os.path.join(images_dir, image_name) for image_name in image_names]
+    masks_fps = [os.path.join(masks_dir, mask_name) for mask_name in image_names]
+    dataset = WGISDBerriesMaskedDataset(images_fps, masks_fps, mean, std, phase, get_transforms)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,

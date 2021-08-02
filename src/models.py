@@ -73,13 +73,10 @@ class Argmaxer(smp.Unet):
 
         masks = self.segmentation_head(decoder_output)
 
-        # masks[0, 1, 200:, :] = masks[0, 1, 200:, :] - 5
-        # torch.sub(masks[0, 1, 200:, :], other=5, alpha=1, out=masks[0, 1, 200:, :])
-
         return torch.argmax(masks, dim=1)
 
 
-class FloatToIntConverter(smp.Unet):
+class Thresholder(smp.Unet):
     def forward(self, x):
         """Sequentially pass `x` trough model`s encoder, decoder and heads"""
         features = self.encoder(x)
@@ -91,19 +88,3 @@ class FloatToIntConverter(smp.Unet):
 
         return masks
 
-# class SegmentationHead(nn.Module):
-#     def __init__(self, encoder, decoder, segmentation_head):
-#         self.de
-#
-#     def forward(self, x):
-#         """Sequentially pass `x` trough model`s encoder, decoder and heads"""
-#         features = self.encoder(x)
-#         decoder_output = self.decoder(*features)
-#
-#         masks = self.segmentation_head(decoder_output)
-#
-#         if self.classification_head is not None:
-#             labels = self.classification_head(features[-1])
-#             return masks, labels
-#
-#         return masks

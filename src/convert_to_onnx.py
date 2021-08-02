@@ -4,6 +4,7 @@ import sys
 
 import torch
 
+from arguments import parse_arguments_convert_to_onnx
 from models import Argmaxer, Thresholder
 
 
@@ -56,26 +57,6 @@ def main(args):
     # Some network backbones, like ResNet, should work without it, but for EfficientNet you need it
     subprocess.run(f'python3 -m onnxsim {args.model_out} {args.model_out}', shell=True)
 
-def parse_arguments(argv):
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--model_in', type=str,
-                        help='Path to a (.pth) file with segmentation net weights',
-                        default='../ckpt/wgisd/effnetb0_unet_gray_2grass_iou55.pth')
-    parser.add_argument('--model_out', type=str,
-                        help='Path to the resulting (.onnx) network',
-                        default='../ckpt/wgisd/effnetb0_unet_gray_2grass_iou55.onnx')
-    parser.add_argument('--num_classes', type=int,
-                        help='Number of semantic classes for the model',
-                        default=11)
-    parser.add_argument('--size', nargs=2, metavar=('width', 'height'),
-                        help='Width followed by the height of the image that network will be configured to inference',
-                        default=(2048, 1344))
-    parser.add_argument('--backend', type=str,
-                        help='Model backend',
-                        default='efficientnet-b0')
-    return parser.parse_args(argv)
-
 
 if __name__ == '__main__':
-    main(parse_arguments(sys.argv[1:]))
+    main(parse_arguments_convert_to_onnx(sys.argv[1:]))

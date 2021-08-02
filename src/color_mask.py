@@ -4,47 +4,15 @@ import os
 import sys
 
 import cv2
-from imgaug.augmentables.segmaps import SegmentationMapsOnImage
 import numpy as np
 import segmentation_models_pytorch as smp
 import torch
 
-COLOR_MAP = {
-    0: (0, 177, 247),
-    1: (94, 30, 104),
-    2: (191, 119, 56),
-    3: (40, 140, 40),
-    4: (146, 243, 146),
-    5: (10, 250, 30),
-    6: (250, 0, 55),
-    7: (178, 20, 50),
-    8: (0, 30, 130),
-    9: (0, 255, 127),
-    10: (243, 15, 190),
-    11: (0, 0, 0),
-}
 
-"""
-(0, 0, 0): 'unlabeled',
-(0, 177, 247): 'sky',
-(94, 30, 104): 'sand',
-(191, 119, 56): 'ground',
-(40, 140, 40): 'tree_bush',
-(146, 243, 146): 'fairway_grass',
-(10, 250, 30): 'raw_grass',
-(250, 0, 55): 'person',
-(178, 20, 50): 'animal',
-(0, 30, 130): 'vehicle',
-(0, 255, 127): 'green_grass',
-"""
-
-
-def load_model(model_name):
-    model = smp.Unet("efficientnet-b0", encoder_weights=None, classes=1, activation=None, )
+def load_model(model_name, num_classes):
+    model = smp.Unet("efficientnet-b0", encoder_weights=None, classes=num_classes, activation=None, )
     model.eval()
-    # model.encoder.set_swish(memory_efficient=False)
-    # ckpt = torch.load(f"../ckpt/{model_name}")
-    ckpt = torch.load(model_name)
+    ckpt = torch.load(model_name, 'cuda:0')
     print(f"Best loss: {ckpt['best_loss']}, epoch: {ckpt['epoch']}")
     model.load_state_dict(ckpt["state_dict"])
     model.cuda()
@@ -104,14 +72,10 @@ def color_image(model, image_path, size, output_name, color_map):
     preds = model.predict(img_tensor).cpu().numpy()
     preds = preds.squeeze()
 
-    # indexes = np.argmax(preds, 0).astype('int32')
-    preds[preds < 0.1] = 0
-    preds[preds >= 0.1] = 1
-    color_map = index2color(preds.astype('int32'), color_map)
+    indexes = np.argmax(preds, 0).astype('int32')
+    color_map = index2color(indexes, color_map)
     img_original = cv2.cvtColor(img_original, cv2.COLOR_RGB2BGR)
     result = img_original + color_map
-    # segmap = SegmentationMapsOnImage(indexes, shape=img.shape)
-    # picture = segmap.draw_on_image(img_original)[0]
     cv2.imwrite(output_name, result)
 
 
@@ -121,14 +85,14 @@ def main(args):
     output_dir = args.output_dir
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    model = load_model(args.model_name)
+    model = load_model(args.model_name, args.num_classes)
     if os.path.isfile(images_path):
         output_name = os.path.join(output_dir, os.path.basename(images_path))
         color_image(model, args.images_path, args.size, output_name, color_map)
         return
     else:
         names = os.listdir(images_path)
-        names = list(filter(lambda x: x.endswith('.jpg'), names))
+        names = list(filter(lambda x: x.endswith('.jpg') or x.endswith('.png'), names))
         for name in names:
             output_name = os.path.join(output_dir, name)
             color_image(model, os.path.join(images_path, name), args.size, output_name, color_map)
@@ -139,20 +103,22 @@ def parse_arguments(argv):
 
     parser.add_argument('--model_name', type=str,
                         help='Name of a pth file in ../ckpt dir',
-                        # default='effnetb0_unet_golf_classes_last.pth')
-                        default='../ckpt/wgisd/wgisd_iou86.pth')
+                        default='../ckpt/autovis/effnetb0_unet_gray_2grass_iou55.pth')
     parser.add_argument('--images_path', type=str,
                         help='Path to an image or a directory for inference',
-                        default='../../autovision/wgisd/mask_test_data')
+                        default='../../autovision/segmentation_dataset/gray_images/')
     parser.add_argument('--output_dir', type=str,
                         help='Path to a directory for inference',
-                        default='../../autovision/wgisd/preds/thresh_0_1344x2048_another_ckpt/test_preds')
-    parser.add_argument('--size', nargs=2, metavar=('newfile', 'oldfile'),
+                        default='../../autovision/segmentation_dataset/val_preds640_2/')
+    parser.add_argument('--size', nargs=2, metavar=('width', 'height'),
                         help='Width followed by the height of the image that network was configured to inference',
-                        default=(2048, 1344))
+                        default=(1280, 640))
     parser.add_argument('--colors', type=str,
                         help='Path to a csv file with color map',
-                        default='../../autovision/wgisd/colors.csv')
+                        default='colors_grass.csv')
+    parser.add_argument('--num_classes', type=int,
+                        help='Number of semantic classes for the model',
+                        default=11)
     return parser.parse_args(argv)
 
 

@@ -11,6 +11,9 @@ def parse_arguments_train(argv):
     parser.add_argument('--df_root', type=str,
                         help='Path to csv file with ground truth masks',
                         default='../data/Severstal/train_test.csv')
+    parser.add_argument('--num_classes', type=int,
+                        help='Number of semantic classes for the model',
+                        default=4)
     parser.add_argument('--use_mixup',
                         help='Enables mixup augmentation', action='store_true')
     parser.add_argument('--model_name', type=str,

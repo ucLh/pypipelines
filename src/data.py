@@ -1,5 +1,4 @@
 from enum import Enum
-import math
 import os
 
 import cv2
@@ -10,9 +9,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import albumentations as albu
 from albumentations import (HorizontalFlip, VerticalFlip, Normalize, RandomCrop, Compose,
-                            RandomBrightnessContrast, Resize, ImageOnlyTransform, CoarseDropout)
-from albumentations.pytorch import ToTensor
+                            RandomBrightnessContrast, Resize, MaskDropout, RandomSizedCrop,
+                            CoarseDropout, OpticalDistortion)
+from albumentations.pytorch import ToTensor, ToTensorV2
 
 
 class DatasetTypes(Enum):
@@ -110,17 +111,208 @@ class SteelDataset(Dataset):
         img_tensor = img_tensor[0, :, :]
         return img_tensor[np.newaxis, ...]
 
+    @staticmethod
+    def _mask_dropout(img, mask):
+        masks = []
+        md_transform = Compose([MaskDropout(max_objects=1, p=0.5), ToTensor()])
+        for i in range(4):
+            img = img.numpy()
+            img = np.transpose(img, [1, 2, 0])
+            augmented = md_transform(image=img, mask=mask[i].numpy())
+            img, mask_aug = augmented['image'], augmented['mask']
+            masks.append(mask_aug[0])
+        masks = torch.stack(masks)
+        return img, masks
+
+
+class GolfDataset(Dataset):
+    CLASSES = ['unlabeled', 'sky', 'sand', 'ground',
+               'building', 'poo', 'ball', 'rock_stone',
+               'tree_bush', 'fairway_grass', 'raw_grass', 'hole',
+               'water', 'person', 'animal', 'vehicle', 'green_grass']
+
+    def __init__(
+            self,
+            data_folder,
+            phase,
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            classes=('tree_bush', 'person', 'animal', 'vehicle')
+    ):
+        # convert str names to class values on masks
+        self.class_values = [self.CLASSES.index(cls.lower()) for cls in classes]
+        self.grass_classes = [self.CLASSES.index(cls.lower()) for cls in ['fairway_grass', 'green_grass']]
+        self.garbage_classes = [self.CLASSES.index(cls.lower()) for cls in ('building', 'poo', 'ball', 'rock_stone',
+                                                                            'hole', 'water',)]
+        self.phase = phase
+        self._get_fps(data_folder)
+        self.mean = mean
+        self.std = std
+        self.transforms = get_transforms(phase, mean, std)
+
+    def _get_fps(self, data_folder):
+        images_dir = os.path.join(data_folder, 'images')
+        masks_dir = os.path.join(data_folder, 'indexes')
+        images_fps, masks_fps = get_file_paths(images_dir, masks_dir)
+        fps_zip = list(zip(images_fps, masks_fps))
+        train_fps, val_fps = train_test_split(fps_zip, test_size=0.15, random_state=69)  # TODO: Add stratification
+        fps = train_fps if self.phase == "train" else val_fps
+        images_fps, masks_fps = list(zip(*fps))  # Unzip images and masks paths
+        self.images_fps = images_fps
+        self.masks_fps = masks_fps
+
+    @staticmethod
+    def _tensor_to_grayscale(img_tensor):
+        # img_tensor = img_tensor[0, :, :]
+        img_tensor = (img_tensor - img_tensor.min()) / (img_tensor - img_tensor.max())
+        return img_tensor[np.newaxis, ...]
+
+    def __getitem__(self, i):
+
+        # read data
+        image = cv2.imread(self.images_fps[i], cv2.IMREAD_GRAYSCALE)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(self.masks_fps[i], 0)
+        # print(self.images_fps[i])
+
+        # unite two types of grass in one class
+        grass_masks = [(mask == v) for v in self.grass_classes]
+        grass_mask = np.logical_or.reduce(grass_masks)
+
+        # unite all auxiliary classes in one garbage class
+        garbage_masks = [(mask == v) for v in self.garbage_classes]
+        garbage_mask = np.logical_or.reduce(garbage_masks)
+
+        masks = [(mask == v) for v in self.class_values]
+        # masks.append(grass_mask)
+        # masks.append(garbage_mask)
+        mask = np.stack(masks, axis=-1).astype('float')
+
+        if self.transforms is not None:
+            augmented = self.transforms(image=image, mask=mask)
+            image = augmented['image']
+            mask = augmented['mask']
+        mask = mask[0].permute(2, 0, 1)
+
+        return image, mask
+
+    def __len__(self):
+        return len(self.images_fps)
+
+
+class WGISDMaskedDataset(Dataset):
+    def __init__(self, root, transforms=None, source='train'):
+        self.root = root
+        self.transforms = transforms
+
+        # Let's load the dataset subset defined by source
+        if source not in ('train', 'val'):
+            print('source should by "train" or "val"')
+            return None
+
+        source_path = os.path.join(root, f'{source}.txt')
+        with open(source_path, 'r') as fp:
+            # Read all lines in file
+            lines = fp.readlines()
+            # Recover the items ids, removing the \n at the end
+            ids = [l.rstrip() for l in lines]
+
+        self.imgs = [os.path.join(root, 'data', f'{id}.jpg') for id in ids]
+        self.masks = [os.path.join(root, 'data', f'{id}.npz') for id in ids]
+        self.boxes = [os.path.join(root, 'data', f'{id}.txt') for id in ids]
+
+    def __getitem__(self, idx):
+        # Load images and masks
+        img_path = self.imgs[idx]
+        mask_path = self.masks[idx]
+
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
+        # img /= 255
+
+        wgisd_masks = np.load(mask_path)['arr_0'].astype(np.uint8)
+        mask = np.logical_or.reduce([mask_ for mask_ in np.rollaxis(wgisd_masks, -1)]) * 1
+        mask = np.expand_dims(mask, -1)
+
+        augmented = self.transforms(image=img, mask=mask)
+
+        img = augmented['image']
+        mask = augmented['mask']
+
+        mask = mask[0].permute(2, 0, 1)
+        mask = torch.as_tensor(mask, dtype=torch.float32)
+
+        return img, mask
+
+    def __len__(self):
+        return len(self.imgs)
+
+
+class WGISDBerriesMaskedDataset(Dataset):
+    CLASSES = ['unlabeled', 'berry', 'border']
+
+    def __init__(
+            self,
+            images_fps,
+            masks_fps,
+            mean,
+            std,
+            phase,
+            transorfms_func,
+            classes=('unlabeled', 'berry', 'border')
+    ):
+        # convert str names to class values on masks
+        self.class_values = [self.CLASSES.index(cls.lower()) for cls in classes]
+
+        self.images_fps = images_fps
+        self.masks_fps = masks_fps
+        self.mean = mean
+        self.std = std
+        self.phase = phase
+        self.transforms = transorfms_func(phase, mean, std)
+
+    @staticmethod
+    def _tensor_to_grayscale(img_tensor):
+        # img_tensor = img_tensor[0, :, :]
+        img_tensor = (img_tensor - img_tensor.min()) / (img_tensor - img_tensor.max())
+        return img_tensor[np.newaxis, ...]
+
+    def __getitem__(self, i):
+        # read data
+        image = cv2.imread(self.images_fps[i])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(self.masks_fps[i], 0)
+        # print(self.images_fps[i])
+
+        masks = [(mask == v) for v in self.class_values]
+        mask = np.stack(masks, axis=-1).astype('float')
+
+        for i in range(10):
+            augmented = self.transforms(image=image, mask=mask)
+            image_aug = augmented['image']
+            mask_aug = augmented['mask']
+            if torch.max(mask_aug) > 0:
+                break
+        mask_aug = mask_aug[0].permute(2, 0, 1)
+
+        return image_aug, mask_aug
+
+    def __len__(self):
+        return len(self.images_fps)
+
 
 class SteelClassify(SteelDataset):
     def __getitem__(self, idx):
         image_id, mask = make_mask(idx, self.df)
         image_path = os.path.join(self.root, image_id)
-        img = cv2.imread(image_path)
-        augmented = self.transforms(image=img, mask=mask)
+        img_raw = cv2.imread(image_path)
+        augmented = self.transforms(image=img_raw, mask=mask)
         img = augmented['image']
         # img = self._tensor_to_grayscale(img)
         mask = augmented['mask']  # 1x256x1600x4
         mask = mask[0].permute(2, 0, 1)  # 4x256x1600
+
+        # img, mask = self._mask_dropout(img, mask)
         label = make_label(mask)
 
         return img, mask, label
@@ -128,15 +320,25 @@ class SteelClassify(SteelDataset):
 
 def get_transforms(phase, mean, std):
     list_transforms = list()
-    list_transforms.append(RandomCrop(256, 512, p=1))
-    # list_transforms.append(Resize(256, 1024, p=1))
+    # list_transforms.append(RandomSizedCrop((465, 930), 512, 1024, p=1, interpolation=0))
+    # list_transforms.append(RandomCrop(448, 768, p=1))
     if phase == "train":
         list_transforms.extend(
             [
+                RandomCrop(448, 800, p=1),
+                CoarseDropout(max_holes=5, max_width=70, max_height=70, min_width=30, min_height=30,
+                              mask_fill_value=0, p=0.5),
                 HorizontalFlip(p=0.5),
                 VerticalFlip(p=0.5),
-                RandomBrightnessContrast(p=0.5),
-                # CoarseDropout(max_height=64, max_width=64, min_height=16, min_width=16, min_holes=3, p=0.5)
+                # RandomBrightnessContrast(p=0.5),
+                OpticalDistortion(distort_limit=0.5, shift_limit=1, interpolation=cv2.INTER_NEAREST,
+                                  border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1),
+            ]
+        )
+    if phase == "val":
+        list_transforms.extend(
+            [
+                Resize(1344, 2048, interpolation=0),
             ]
         )
     list_transforms.extend(
@@ -147,6 +349,88 @@ def get_transforms(phase, mean, std):
     )
     list_trfms = Compose(list_transforms)
     return list_trfms
+
+
+def get_file_paths(images_dir, masks_dir):
+
+    def paste_mask_postfix(image_name):
+        post = image_name[-4:]  # .png
+        pre = image_name[:-4]
+        return pre + '_color_mask' + post
+
+    image_names = sorted(os.listdir(images_dir))
+    mask_names = list(map(paste_mask_postfix, image_names))
+    images_fps = [os.path.join(images_dir, image_name) for image_name in image_names]
+    masks_fps = [os.path.join(masks_dir, mask_name) for mask_name in mask_names]
+    return images_fps, masks_fps
+
+
+def non_df_provider(
+        data_folder,
+        phase,
+        mean=None,
+        std=None,
+        batch_size=8,
+        num_workers=1,
+):
+    dataset = GolfDataset(data_folder, phase, mean=mean, std=std)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    return dataloader
+
+
+def wgisd_provider(
+        data_folder,
+        phase,
+        mean=None,
+        std=None,
+        batch_size=8,
+        num_workers=4,
+):
+    transforms = get_transforms(phase, mean, std)
+    dataset = WGISDMaskedDataset(data_folder, transforms=transforms, source=phase)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    return dataloader
+
+
+def wgisd_berries_provider(
+        data_folder,
+        phase,
+        mean=None,
+        std=None,
+        batch_size=8,
+        num_workers=1,
+):
+    if phase == 'train':
+        images_dir = os.path.join(data_folder, 'box_train')
+        masks_dir = os.path.join(data_folder, 'berries_masks/train')
+    else:
+        images_dir = os.path.join(data_folder, 'box_val')
+        masks_dir = os.path.join(data_folder, 'berries_masks/val')
+
+    image_names = sorted(os.listdir(images_dir))
+    images_fps = [os.path.join(images_dir, image_name) for image_name in image_names]
+    masks_fps = [os.path.join(masks_dir, mask_name) for mask_name in image_names]
+    dataset = WGISDBerriesMaskedDataset(images_fps, masks_fps, mean, std, phase, get_transforms)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    return dataloader
 
 
 def provider(
@@ -279,5 +563,73 @@ def shuffle_minibatch_onehot(inputs, targets, mixup=True):
     inputs_shuffle = inputs1 + inputs2
     targets_shuffle = targets1_oh + targets2_oh
 
-    return inputs_shuffle, targets_shuffle
+def shuffle_minibatch_combined(inputs, targets, masks, mixup=True):
+    """Shuffle a minibatch and do linear interpolation between images and labels.
+        Args:
+            inputs: a numpy array of images with size batch_size x H x W x 3.
+            targets: a numpy array of labels with size batch_size x 1.
+            mixup: a boolen as whether to do mixup or not. If mixup is True, we
+                sample the weight from beta distribution using parameter alpha=1,
+                beta=1. If mixup is False, we set the weight to be 1 and 0
+                respectively for the randomly shuffled mini-batches.
+        """
+    batch_size = inputs.shape[0]
+    rp1 = torch.randperm(batch_size)
+    inputs1 = inputs[rp1]
+    targets1 = targets[rp1]
+    targets1_1 = targets1.unsqueeze(1)
+    masks1 = masks[rp1]
 
+    rp2 = torch.randperm(batch_size)
+    inputs2 = inputs[rp2]
+    targets2 = targets[rp2]
+    masks2 = masks[rp2]
+
+    y_onehot = torch.FloatTensor(batch_size, 4)
+    y_onehot.zero_()
+    targets1_oh = y_onehot.scatter_(1, targets1.long(), 1)
+
+    y_onehot2 = torch.FloatTensor(batch_size, 4)
+    y_onehot2.zero_()
+    targets2_oh = y_onehot2.scatter_(1, targets2.long(), 1)
+
+    if mixup is True:
+        a = np.random.beta(1, 1, [batch_size, 1])
+    else:
+        a = np.ones((batch_size, 1))
+
+    b = np.tile(a[..., None, None], [1, 3, 256, 512])
+
+    inputs1 = inputs1 * torch.from_numpy(b).float()
+    inputs2 = inputs2 * torch.from_numpy(1 - b).float()
+
+    masks1 = masks1 * torch.from_numpy(b).float()
+    masks2 = masks2 * torch.from_numpy(1 - b).float()
+
+    c = np.tile(a, [1, 4])
+    targets1_oh = targets1_oh.float() * torch.from_numpy(c).float()
+    targets2_oh = targets2_oh.float() * torch.from_numpy(1 - c).float()
+
+    inputs_shuffle = inputs1 + inputs2
+    targets_shuffle = targets1_oh + targets2_oh
+    masks_shuffle = masks1 + masks2
+
+    return inputs_shuffle, targets_shuffle, masks_shuffle
+
+if __name__ == '__main__':
+    all_names = os.listdir('../../autovision/wgisd/data')
+    all_names = list(filter(lambda x: x.endswith('.jpg'), all_names))
+    all_paths = set([os.path.join('../../autovision/wgisd/data', name) for name in all_names])
+    dataset_train = WGISDMaskedDataset('../../autovision/wgisd')
+    dataset_val = WGISDMaskedDataset('../../autovision/wgisd', source='val')
+
+    train_paths = dataset_train.imgs
+    val_paths = dataset_val.imgs
+    # not_train = all_paths - train_paths
+    import subprocess
+    for path in val_paths:
+        dir_name = os.path.dirname(path).split('/')[:-1]
+        dir_name = '/'.join(dir_name)
+        dir_name += '/box_val'
+        print(path)
+        subprocess.run(f'cp {path} {dir_name}', shell=True)

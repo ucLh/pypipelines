@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import Threshold
 import segmentation_models_pytorch as smp
 
 
@@ -63,19 +64,27 @@ class Decoder(smp.Unet):
         masks = self.segmentation_head(decoder_output)
         return masks
 
-# class SegmentationHead(nn.Module):
-#     def __init__(self, encoder, decoder, segmentation_head):
-#         self.de
-#
-#     def forward(self, x):
-#         """Sequentially pass `x` trough model`s encoder, decoder and heads"""
-#         features = self.encoder(x)
-#         decoder_output = self.decoder(*features)
-#
-#         masks = self.segmentation_head(decoder_output)
-#
-#         if self.classification_head is not None:
-#             labels = self.classification_head(features[-1])
-#             return masks, labels
-#
-#         return masks
+
+class Argmaxer(smp.Unet):
+    def forward(self, x):
+        """Sequentially pass `x` trough model`s encoder, decoder and heads"""
+        features = self.encoder(x)
+        decoder_output = self.decoder(*features)
+
+        masks = self.segmentation_head(decoder_output)
+
+        return torch.argmax(masks, dim=1)
+
+
+class Thresholder(smp.Unet):
+    def forward(self, x):
+        """Sequentially pass `x` trough model`s encoder, decoder and heads"""
+        features = self.encoder(x)
+        decoder_output = self.decoder(*features)
+
+        masks = self.segmentation_head(decoder_output)
+        # Everything below zero to zero, everything above zero to one
+        masks = torch.clamp(masks, min=0).bool().int()
+
+        return masks
+

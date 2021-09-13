@@ -11,9 +11,11 @@ import torch.backends.cudnn as cudnn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 from torch.multiprocessing import set_start_method
+from tqdm import tqdm
 
 from arguments import parse_arguments_train
-from data import non_df_provider, visualize, shuffle_minibatch
+from data.dirt_dataset import dirt_provider
+from data.common import visualize
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 from lovasz_loss import LovaszHingeLoss
 
@@ -23,11 +25,11 @@ warnings.filterwarnings('ignore')
 class Trainer(object):
     '''This class takes care of training and validation of our model'''
     def __init__(self, model, checkpoint, mode, args):
-        self.num_workers = 1
-        self.batch_size = {"train": 1, "val": 1}
+        self.num_workers = 8
+        self.batch_size = {"train": 2, "val": 4}
         self.accumulation_steps = 32 // self.batch_size['train']
-        self.lr = 1e-3
-        self.num_epochs = 2
+        self.lr = 1e-4
+        self.num_epochs = 50
         self.start_epoch = 0
         self.best_dice = 0
         self.best_loss = 1e6
@@ -51,7 +53,7 @@ class Trainer(object):
         # self.scheduler = ReduceLROnPlateau(self.optimizer, mode="min", patience=3, verbose=True, factor=0.2)
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: non_df_provider(
+            phase: dirt_provider(
                 data_folder=self.args.data_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
@@ -154,7 +156,7 @@ class Trainer(object):
         running_loss, rn_loss_seg, rn_loss_cls, rn_loss_dice = 0.0, 0.0, 0.0, 0.0
         total_batches = len(dataloader)
         self.optimizer.zero_grad()
-        for itr, batch in enumerate(dataloader):  # replace `dataloader` with `tk0` for tqdm
+        for itr, batch in tqdm(enumerate(dataloader)):  # replace `dataloader` with `tk0` for tqdm
             try:
                 images, masks, labels = batch
             except ValueError:
@@ -247,7 +249,7 @@ def prepare_and_visualize(image, mask):
     image = np.transpose(image, [1, 2, 0])
     mask = np.transpose(mask, [1, 2, 0])
     # print(image.shape, mask.shape)
-    for i in range(11):
+    for i in range(3):
         visualize(image=image[:, :, 0], mask=mask[:, :, i])
 
 

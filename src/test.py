@@ -10,7 +10,8 @@ import torch.backends.cudnn as cudnn
 from torch.multiprocessing import set_start_method
 
 from arguments import parse_arguments_train
-from data import visualize, non_df_provider
+from data.dirt_dataset import dirt_provider
+from data.common import visualize
 from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
 
 warnings.filterwarnings('ignore')
@@ -42,7 +43,7 @@ class Trainer(object):
         self.criterion_cls = torch.nn.BCEWithLogitsLoss()
         cudnn.benchmark = False
         self.dataloaders = {
-            phase: non_df_provider(
+            phase: dirt_provider(
                 data_folder=self.args.data_root,
                 phase=phase,
                 mean=(0.485, 0.456, 0.406),
@@ -206,7 +207,7 @@ def main(args):
                     # aux_params={'classes': 4, 'dropout': 0.75})
     if os.path.isfile(args.model):
         ckpt = torch.load(args.model)
-        print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
+        # print("Loaded existing checkpoint!", f"Continue from epoch {ckpt['epoch']}", sep='\n')
 
     for mode in TrainerModes:
         if mode.value == args.mode:

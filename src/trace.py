@@ -3,7 +3,6 @@ import sys
 
 import segmentation_models_pytorch as smp
 import torch
-from pytorch_v2.pytorch_seg_models import Unet as Unet2
 
 
 def main(args):

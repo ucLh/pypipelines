@@ -6,14 +6,12 @@ import os
 import sys
 
 import numpy as np
-import cv2
 import albumentations as A
 from tqdm import tqdm
 import pandas as pd
 from prettytable import PrettyTable
 
 import torch
-import torch.nn as nn
 import torch.onnx
 from torch.utils.data import DataLoader
 from torch.jit import load
@@ -23,7 +21,7 @@ from mlcomp.contrib.dataset.classify import ImageDataset
 from mlcomp.contrib.transform.rle import mask2rle
 from mlcomp.contrib.transform.tta import TtaWrap
 
-from data import make_mask_custom
+from data.common import make_mask_custom
 from util import compute_iou_batch, dice_channel_torch, dice_single_channel, MetricsLogger
 
 

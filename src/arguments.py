@@ -47,7 +47,7 @@ def parse_arguments_color_mask(argv):
                         default=(1280, 640))
     parser.add_argument('--colors', type=str,
                         help='Path to a csv file with color map',
-                        default='colors_grass.csv')
+                        default='colors.csv')
     parser.add_argument('--num_classes', type=int,
                         help='Number of semantic classes for the model',
                         default=11)

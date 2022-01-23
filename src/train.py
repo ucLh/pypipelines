@@ -16,8 +16,9 @@ from tqdm import tqdm
 from arguments import parse_arguments_train
 from data.dirt_dataset import dirt_provider
 from data.common import visualize
-from util import Meter, MetricsLogger, DiceLoss, TrainerModes, set_parameter_requires_grad
-from lovasz_loss import LovaszHingeLoss
+from util import Meter, MetricsLogger, TrainerModes, set_parameter_requires_grad
+from losses.lovasz_loss import LovaszHingeLoss
+from losses.dice_loss import DiceLoss
 
 warnings.filterwarnings('ignore')
 
@@ -163,8 +164,6 @@ class Trainer(object):
                 images, masks = batch
                 labels = torch.randn(1)
 
-            if phase == "train" and self.args.use_mixup:
-                images, masks = shuffle_minibatch(images, masks)
             losses, outputs = self.forward(images, masks, labels)
 
             if self.mode == TrainerModes.combine:
